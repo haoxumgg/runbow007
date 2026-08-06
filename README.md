@@ -4,13 +4,13 @@
 
 ## 已实现
 
-- 使用 Playwright 登录李宁 TMS、进入集团订单管理、应用保存筛选并下载全部 Excel；
+- 使用 Playwright 登录李宁 TMS、进入集团订单管理、应用保存筛选、创建导出任务并从下载中心取得完整 Excel；
 - 读取 `.xls` 和 `.xlsx`，验证必要表头、订单号唯一性以及页面总数；
 - 直接使用 TMS 的“预计到达时间”，不重复计算李宁系统的时效规则；
 - 实现四类提醒：WMS过账时效、今日预计到达、合同签署异常、延迟无原因；
 - SQLite 保存订单、运行批次、异常事件和飞书发送记录；
 - 新异常立即提醒，R3/R4 未解决异常每天 09:00 后最多再提醒一次；
-- 通过飞书自建应用发送群消息并真正 @ 指定用户；
+- 通过飞书自建应用发送群消息，可选真正 @ 指定用户；
 - 默认演练模式，不会误发生产群；
 - 支持手工下载 Excel 后走同一套校验、规则和发送链路。
 
@@ -56,7 +56,7 @@ Set-ExecutionPolicy -Scope Process Bypass
    - 填写 `tms.username`；
    - 填写飞书自建应用 `app_id`；
    - 保留已确认群 ID `oc_f79000009c4f09cbdf78b55fd35ae04a`；
-   - 填写许昊的飞书 `open_id` 或 `user_id`；
+   - `mention_user_id` 可留空，只发送普通群消息；需要真正 @ 时再填写飞书 `open_id` 或 `user_id`；
    - 首次联调时校准 TMS 页面选择器。
 2. 将密码保存到 Windows 凭据管理器：
 
@@ -92,7 +92,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\runbow007.exe --config config.yaml run --rules R2
 ```
 
-`TmsDownloader` 优先按中文语义定位按钮，CSS 选择器可以在配置中覆盖。首次拿到账号后需要用有界面模式校准一次：
+`TmsDownloader` 优先按中文语义定位按钮，CSS 选择器可以在配置中覆盖。李宁系统的导出是后台任务，程序会自动确认导出、轮询下载中心并取得成功文件。首次拿到账号后需要用有界面模式校准一次：
 
 ```yaml
 tms:

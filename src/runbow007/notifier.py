@@ -55,7 +55,7 @@ class MessageFormatter:
                 {"tag": "at", "user_id": self.mention_user_id},
                 {"tag": "text", "text": " 请关注以下订单："},
             ]
-        return [{"tag": "text", "text": f"@{self.mention_name} 请关注以下订单："}]
+        return [{"tag": "text", "text": "请关注以下订单："}]
 
     @staticmethod
     def _text_line(text: str) -> list[dict[str, Any]]:

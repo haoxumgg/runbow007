@@ -21,24 +21,23 @@ tms:
   # 李宁 TMS 中配置好历史未完结查询后再填写。
   open_carryover_preset: ""
   selectors:
-    username: "input[name='username'], input[placeholder*='账号']"
+    username: "input[name='username'], input[placeholder*='账号'], input[placeholder*='用户名']"
     password: "input[type='password']"
-    # 留空时按按钮中文定位；页面定位不稳定时填写 CSS 选择器。
-    login_button: ""
-    advanced_filter_button: ""
-    preset_name: ""
-    # 日期输入框必须在首次联调时根据真实页面校准。
-    date_from_input: ""
-    query_button: ""
-    # 配置后会强校验页面总数与 Excel 唯一订单数。
-    total_count: ""
-    download_button: ""
+    # 以下选择器已按 hdrunbow 账号的真实页面校准。
+    login_button: ".submit-btn"
+    advanced_filter_button: "#searchItem"
+    preset_name: ".el-dialog:visible .page-header-title"
+    date_from_input: ".el-dialog:visible .el-date-editor input"
+    query_button: ".el-dialog:visible button.el-button--primary"
+    # 页面总数会与 Excel 唯一订单数强校验。
+    total_count: "button.pagination-total"
+    download_button: "button:has(.thorn6-icon-daoru)"
 
 feishu:
   # 自建应用 App ID；App Secret 通过 credentials set-feishu 保存。
   app_id: ""
   chat_id: oc_f79000009c4f09cbdf78b55fd35ae04a
-  # 必须填写许昊在当前飞书应用下可识别的 open_id/user_id，才能真正 @。
+  # 可选：留空时只发普通群消息；填写 open_id/user_id 后才会真正 @。
   mention_user_id: ""
   mention_name: 许昊
   request_timeout_seconds: 20

@@ -26,15 +26,18 @@ class RuntimeConfig:
 
 @dataclass(slots=True)
 class TmsSelectors:
-    username: str = "input[name='username'], input[placeholder*='账号']"
+    username: str = (
+        "input[name='username'], input[placeholder*='账号'], "
+        "input[placeholder*='用户名']"
+    )
     password: str = "input[type='password']"
-    login_button: str = ""
-    advanced_filter_button: str = ""
-    preset_name: str = ""
-    date_from_input: str = ""
-    query_button: str = ""
-    total_count: str = ""
-    download_button: str = ""
+    login_button: str = ".submit-btn"
+    advanced_filter_button: str = "#searchItem"
+    preset_name: str = ".el-dialog:visible .page-header-title"
+    date_from_input: str = ".el-dialog:visible .el-date-editor input"
+    query_button: str = ".el-dialog:visible button.el-button--primary"
+    total_count: str = "button.pagination-total"
+    download_button: str = "button:has(.thorn6-icon-daoru)"
 
 
 @dataclass(slots=True)
@@ -135,7 +138,6 @@ class AppConfig:
                 for name, value in (
                     ("feishu.app_id", self.feishu.app_id),
                     ("feishu.chat_id", self.feishu.chat_id),
-                    ("feishu.mention_user_id", self.feishu.mention_user_id),
                 )
                 if not value
             ]

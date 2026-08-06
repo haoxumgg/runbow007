@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import AppConfig
@@ -76,10 +76,10 @@ class TmsDownloader:
             button = self._locator_or_button(
                 page, self.config.tms.selectors.download_button, r"下载|批量导出"
             )
-            download_timeout = self.config.tms.download_timeout_seconds * 1000
-            with page.expect_download(timeout=download_timeout) as info:
-                button.click()
-            download = info.value
+            export_started = datetime.now()
+            button.click()
+            self._confirm_export(page)
+            download = self._download_from_center(page, export_started, ui_total)
             suggested = Path(download.suggested_filename)
             suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
             target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
@@ -93,17 +93,32 @@ class TmsDownloader:
     def _login_if_needed(self, page: object, password: str) -> None:
         selectors = self.config.tms.selectors
         username = page.locator(selectors.username).first
-        try:
-            visible = username.is_visible(timeout=3_000)
-        except Exception:
-            visible = False
+        # TMS 是 SPA，DOMContentLoaded 后登录表单或首页菜单仍会延迟挂载。
+        visible = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                if username.is_visible():
+                    visible = True
+                    break
+                home = page.get_by_text("下载中心", exact=True)
+                if any(home.nth(index).is_visible() for index in range(home.count())):
+                    return
+            except Exception:
+                pass
+            page.wait_for_timeout(250)
         if not visible:
             return
         username.fill(self.config.tms.username)
         page.locator(selectors.password).first.fill(password)
         button = self._locator_or_button(page, selectors.login_button, r"登录|登 录")
         button.click()
-        page.wait_for_load_state("domcontentloaded")
+        try:
+            page.wait_for_function(
+                "() => !location.hash.includes('/login')", timeout=15_000
+            )
+        except Exception:
+            pass
         try:
             still_visible = username.is_visible(timeout=5_000)
         except Exception:
@@ -111,10 +126,15 @@ class TmsDownloader:
         if still_visible:
             raise TmsAuthenticationError("TMS 登录后仍停留在登录页，请检查账号或密码")
 
-    @staticmethod
-    def _open_order_page(page: object) -> None:
-        page.get_by_text("订单管理", exact=True).first.click()
-        page.get_by_text("集团订单管理", exact=True).first.click()
+    @classmethod
+    def _open_order_page(cls, page: object) -> None:
+        advanced = page.locator("#searchItem").first
+        if advanced.count() and advanced.is_visible():
+            return
+        cls._click_visible_text(page, "订单管理")
+        page.wait_for_timeout(500)
+        cls._click_visible_text(page, "集团订单管理")
+        advanced.wait_for(state="visible")
 
     def _apply_filters(self, page: object, dataset: str) -> None:
         selectors = self.config.tms.selectors
@@ -126,16 +146,19 @@ class TmsDownloader:
             else self.config.tms.open_carryover_preset
         )
         if preset:
-            if selectors.preset_name:
-                page.locator(selectors.preset_name).first.click()
-            else:
-                page.get_by_text(preset, exact=True).first.click()
+            preset_trigger = selectors.preset_name or ".el-dialog:visible .page-header-title"
+            page.locator(preset_trigger).first.click()
+            self._click_visible_text(page, preset)
         if dataset == "current_month" and selectors.date_from_input:
             month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d 00:00")
             page.locator(selectors.date_from_input).first.fill(month_start)
         query = self._locator_or_button(page, selectors.query_button, r"查询")
         query.click()
-        page.wait_for_load_state("networkidle")
+        try:
+            page.wait_for_load_state("networkidle", timeout=20_000)
+        except Exception:
+            logger.info("TMS 页面持续有后台请求，跳过 networkidle 等待")
+        page.wait_for_timeout(2_000)
 
     def _read_total(self, page: object) -> int | None:
         selector = self.config.tms.selectors.total_count
@@ -145,8 +168,125 @@ class TmsDownloader:
         match = re.search(r"([\d,]+)", text)
         return int(match.group(1).replace(",", "")) if match else None
 
+    def _confirm_export(self, page: object) -> None:
+        confirms = page.get_by_role("button", name="确定")
+        deadline = time.monotonic() + 15
+        clicked = False
+        while time.monotonic() < deadline:
+            for index in range(confirms.count()):
+                confirm = confirms.nth(index)
+                if confirm.is_visible():
+                    confirm.click()
+                    clicked = True
+                    break
+            if clicked:
+                break
+            page.wait_for_timeout(250)
+        if not clicked:
+            raise TmsDownloadError("点击导出后未出现确认窗口")
+
+        success = page.get_by_text("下载任务添加成功", exact=False)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(
+                success.nth(index).is_visible() for index in range(success.count())
+            ):
+                return
+            page.wait_for_timeout(250)
+        raise TmsDownloadError("TMS 未确认创建下载任务")
+
+    def _download_from_center(
+        self, page: object, export_started: datetime, expected_total: int | None
+    ) -> object:
+        self._click_visible_text(page, "下载中心", force=True)
+        page.wait_for_timeout(2_000)
+        deadline = time.monotonic() + self.config.tms.download_timeout_seconds
+        earliest = export_started - timedelta(minutes=1)
+        last_snapshot: tuple[object, ...] | None = None
+
+        while time.monotonic() < deadline:
+            # Element UI 会为固定列复制 tbody；只遍历包含任务名的完整任务行。
+            rows = page.locator("tr").filter(has_text="maintainCompanyOrderPage")
+            for index in range(min(rows.count(), 20)):
+                row = rows.nth(index)
+                text = row.inner_text()
+                if "maintainCompanyOrderPage" not in text:
+                    continue
+                started_at, record_count = self._parse_download_row(text)
+                if index == 0:
+                    snapshot = (started_at, record_count, "成功" in text, expected_total)
+                    if snapshot != last_snapshot:
+                        logger.info(
+                            "下载中心最新任务: started_at=%s records=%s success=%s "
+                            "expected=%s earliest=%s",
+                            started_at,
+                            record_count,
+                            "成功" in text,
+                            expected_total,
+                            earliest,
+                        )
+                        last_snapshot = snapshot
+                if started_at is None or started_at < earliest:
+                    continue
+                if "失败" in text:
+                    raise TmsDownloadError(f"TMS 下载中心任务失败: {text[:200]}")
+                if "成功" not in text:
+                    continue
+                if expected_total is not None and record_count != expected_total:
+                    continue
+                link = row.locator("a:has(img[src*='excel'])").first
+                if not link.count() or not link.is_visible():
+                    continue
+                remaining = max(1, int(deadline - time.monotonic())) * 1_000
+                with page.expect_download(timeout=remaining) as info:
+                    link.click()
+                return info.value
+
+            refresh = page.locator("#refreshItem").first
+            if refresh.count() and refresh.is_visible():
+                refresh.click(force=True)
+            page.wait_for_timeout(2_000)
+
+        raise TmsDownloadError("TMS 下载中心任务在超时时间内未完成")
+
+    @staticmethod
+    def _parse_download_row(text: str) -> tuple[datetime | None, int | None]:
+        timestamps = re.findall(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", text)
+        started_at = (
+            datetime.strptime(timestamps[0], "%Y-%m-%d %H:%M") if timestamps else None
+        )
+        tokens = [item.strip() for item in re.split(r"[\r\n\t]+", text) if item.strip()]
+        numeric = [int(item) for item in tokens if item.isdigit()]
+        record_count = numeric[-2] if len(numeric) >= 2 else None
+        return started_at, record_count
+
     @staticmethod
     def _locator_or_button(page: object, selector: str, name_pattern: str) -> object:
         if selector:
             return page.locator(selector).first
         return page.get_by_role("button", name=re.compile(name_pattern)).last
+
+    @staticmethod
+    def _click_visible_text(page: object, text: str, *, force: bool = False) -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            matches = page.get_by_text(text, exact=True)
+            for index in range(matches.count()):
+                candidate = matches.nth(index)
+                if candidate.is_visible():
+                    if force:
+                        # 成功提示会长期覆盖菜单中心，点击右侧未被遮挡的边缘。
+                        box = candidate.bounding_box()
+                        if not box:
+                            raise TmsDownloadError(f"页面元素没有可点击区域: {text}")
+                        candidate.click(
+                            position={
+                                "x": max(1, box["width"] - 3),
+                                "y": max(1, box["height"] / 2),
+                            }
+                        )
+                    else:
+                        candidate.click()
+                    return
+            page.wait_for_timeout(250)
+        raise TmsDownloadError(f"页面未找到可见元素: {text}")
