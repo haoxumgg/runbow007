@@ -1,0 +1,52 @@
+runtime:
+  timezone: Asia/Shanghai
+  # 第一轮必须保持 true；核对候选消息后再通过 --send 显式发送。
+  dry_run: true
+  data_dir: data
+  downloads_dir: downloads
+  logs_dir: logs
+  browser_profile_dir: browser-profile
+  database_path: data/runbow007.db
+  lock_path: data/runbow007.lock
+  retain_days: 30
+
+tms:
+  url: https://otb.lining.com/#/
+  # 只写账号，密码通过 credentials set-tms 保存到 Windows 凭据管理器。
+  username: ""
+  headless: true
+  navigation_timeout_seconds: 45
+  download_timeout_seconds: 180
+  current_month_preset: AI导出数据（勿动）
+  # 李宁 TMS 中配置好历史未完结查询后再填写。
+  open_carryover_preset: ""
+  selectors:
+    username: "input[name='username'], input[placeholder*='账号']"
+    password: "input[type='password']"
+    # 留空时按按钮中文定位；页面定位不稳定时填写 CSS 选择器。
+    login_button: ""
+    advanced_filter_button: ""
+    preset_name: ""
+    # 日期输入框必须在首次联调时根据真实页面校准。
+    date_from_input: ""
+    query_button: ""
+    # 配置后会强校验页面总数与 Excel 唯一订单数。
+    total_count: ""
+    download_button: ""
+
+feishu:
+  # 自建应用 App ID；App Secret 通过 credentials set-feishu 保存。
+  app_id: ""
+  chat_id: oc_f79000009c4f09cbdf78b55fd35ae04a
+  # 必须填写许昊在当前飞书应用下可识别的 open_id/user_id，才能真正 @。
+  mention_user_id: ""
+  mention_name: 许昊
+  request_timeout_seconds: 20
+  max_orders_per_message: 40
+
+rules:
+  enabled: [R1, R2, R3, R4]
+  # 规则：0 <= 离厂时间 - WMS过账时间 < 90分钟。
+  wms_lead_minutes: 90
+  # R3/R4 未解决异常每天从此小时开始允许再次提醒。
+  unresolved_repeat_hour: 9
