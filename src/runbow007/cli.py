@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import argparse
+import getpass
+import logging
+import sys
+from pathlib import Path
+
+import portalocker
+
+from .config import AppConfig
+from .credentials import set_feishu_secret, set_tms_password
+from .downloader import TmsDownloader
+from .pipeline import Pipeline
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="007 李宁 TMS 提醒自动化")
+    parser.add_argument("--config", default="config.yaml", help="YAML 配置文件")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("check-config", help="检查配置并初始化本地目录/数据库")
+
+    process = subparsers.add_parser("process-file", help="处理已下载的 Excel")
+    process.add_argument("file", help=".xls/.xlsx 文件")
+    process.add_argument("--rules", default="R1,R2,R3,R4", help="逗号分隔的规则")
+    process.add_argument("--ui-total", type=int, help="TMS 页面显示的总数")
+    process.add_argument("--send", action="store_true", help="真实发送飞书")
+
+    run = subparsers.add_parser("run", help="自动登录 TMS、下载并处理")
+    run.add_argument(
+        "--dataset", choices=("current_month", "open_carryover"), default="current_month"
+    )
+    run.add_argument("--rules", default="R1,R3,R4", help="逗号分隔的规则")
+    run.add_argument("--send", action="store_true", help="真实发送飞书")
+
+    credentials = subparsers.add_parser("credentials", help="保存凭据到系统凭据库")
+    credentials_sub = credentials.add_subparsers(dest="credential_command", required=True)
+    credentials_sub.add_parser("set-tms", help="保存 TMS 密码")
+    credentials_sub.add_parser("set-feishu", help="保存飞书 App Secret")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        config = AppConfig.load(args.config)
+        config.ensure_directories()
+        _configure_logging(config.runtime.logs_dir)
+
+        if args.command == "credentials":
+            return _credentials(args, config)
+        if args.command == "check-config":
+            Pipeline(config)
+            print(f"配置有效；数据库: {config.runtime.database_path}")
+            return 0
+
+        with portalocker.Lock(config.runtime.lock_path, timeout=1):
+            pipeline = Pipeline(config)
+            if args.command == "process-file":
+                result = pipeline.process_file(
+                    args.file,
+                    rule_codes=_rules(args.rules),
+                    expected_ui_total=args.ui_total,
+                    send=args.send,
+                )
+            else:
+                download = TmsDownloader(config).download(args.dataset)
+                result = pipeline.process_file(
+                    download.path,
+                    rule_codes=_rules(args.rules),
+                    expected_ui_total=download.ui_total,
+                    send=args.send,
+                )
+        print(
+            f"运行完成: rows={result.row_count}, candidates={result.candidate_count}, "
+            f"sent={result.sent_count}, run_id={result.run_id}"
+        )
+        return 0
+    except portalocker.AlreadyLocked:
+        print("已有任务运行，本次跳过", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        logging.getLogger(__name__).exception("运行失败")
+        print(f"运行失败: {exc}", file=sys.stderr)
+        return 2
+
+
+def _credentials(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.credential_command == "set-tms":
+        if not config.tms.username:
+            raise ValueError("请先在 config.yaml 设置 tms.username")
+        password = getpass.getpass("李宁 TMS 密码: ")
+        set_tms_password(config.tms.username, password)
+        print("TMS 密码已保存到系统凭据库")
+        return 0
+    if not config.feishu.app_id:
+        raise ValueError("请先在 config.yaml 设置 feishu.app_id")
+    secret = getpass.getpass("飞书 App Secret: ")
+    set_feishu_secret(config.feishu.app_id, secret)
+    print("飞书 App Secret 已保存到系统凭据库")
+    return 0
+
+
+def _rules(value: str) -> tuple[str, ...]:
+    return tuple(item.strip().upper() for item in value.split(",") if item.strip())
+
+
+def _configure_logging(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_dir / "runbow007.log", encoding="utf-8"),
+        ],
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
