@@ -1,0 +1,166 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_smoke_test:
+        description: "部署后执行一次真实下载演练（不会发送飞书消息）"
+        required: true
+        default: true
+        type: boolean
+      enable_timers:
+        description: "演练成功后启用 7×24 systemd 定时器（仍保持不发送）"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runbow007-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      RUNBOW007_TMS_USERNAME: ${{ vars.RUNBOW007_TMS_USERNAME }}
+      RUNBOW007_FEISHU_APP_ID: ${{ vars.RUNBOW007_FEISHU_APP_ID }}
+      RUNBOW007_FEISHU_CHAT_ID: ${{ vars.RUNBOW007_FEISHU_CHAT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment settings
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          RUNBOW007_TMS_PASSWORD: ${{ secrets.RUNBOW007_TMS_PASSWORD }}
+          RUNBOW007_FEISHU_APP_SECRET: ${{ secrets.RUNBOW007_FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          required=(
+            DEPLOY_HOST
+            DEPLOY_USER
+            DEPLOY_SSH_PRIVATE_KEY
+            DEPLOY_KNOWN_HOSTS
+            RUNBOW007_TMS_USERNAME
+            RUNBOW007_TMS_PASSWORD
+            RUNBOW007_FEISHU_APP_ID
+            RUNBOW007_FEISHU_APP_SECRET
+            RUNBOW007_FEISHU_CHAT_ID
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub Actions setting: $name" >&2
+              exit 1
+            fi
+          done
+          [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || {
+            echo "DEPLOY_HOST is not a valid IPv4 address or hostname" >&2
+            exit 1
+          }
+          [[ "$DEPLOY_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || {
+            echo "DEPLOY_USER is not valid" >&2
+            exit 1
+          }
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] \
+            && (( DEPLOY_PORT >= 1 && DEPLOY_PORT <= 65535 )) || {
+              echo "DEPLOY_PORT must be between 1 and 65535" >&2
+              exit 1
+            }
+
+      - name: Prepare pinned SSH connection
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/id_runbow007"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/id_runbow007" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/id_runbow007" >/dev/null
+
+      - name: Build deployment payload
+        shell: bash
+        env:
+          RUNBOW007_TMS_PASSWORD: ${{ secrets.RUNBOW007_TMS_PASSWORD }}
+          RUNBOW007_FEISHU_APP_SECRET: ${{ secrets.RUNBOW007_FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/runbow007-${GITHUB_SHA}.tar.gz"
+          payload="$RUNNER_TEMP/runbow007-${GITHUB_SHA}.env"
+          git archive --format=tar.gz --output="$archive" "$GITHUB_SHA"
+          PAYLOAD_PATH="$payload" python - <<'PY'
+          import os
+          from pathlib import Path
+
+          names = (
+              "RUNBOW007_TMS_USERNAME",
+              "RUNBOW007_TMS_PASSWORD",
+              "RUNBOW007_FEISHU_APP_ID",
+              "RUNBOW007_FEISHU_APP_SECRET",
+              "RUNBOW007_FEISHU_CHAT_ID",
+          )
+
+          def compose_quote(value: str) -> str:
+              if "\n" in value or "\r" in value:
+                  raise SystemExit("Runbow007 settings must be single-line values")
+              escaped = (
+                  value.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("$", "$$")
+              )
+              return f'"{escaped}"'
+
+          content = "".join(f"{name}={compose_quote(os.environ[name])}\n" for name in names)
+          target = Path(os.environ["PAYLOAD_PATH"])
+          target.write_text(content, encoding="utf-8")
+          target.chmod(0o600)
+          PY
+
+      - name: Upload and deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$HOME/.ssh/id_runbow007"
+          known_hosts="$HOME/.ssh/known_hosts"
+          archive="$RUNNER_TEMP/runbow007-${GITHUB_SHA}.tar.gz"
+          payload="$RUNNER_TEMP/runbow007-${GITHUB_SHA}.env"
+          remote_script="/tmp/runbow007-deploy-${GITHUB_SHA}.sh"
+          target="${DEPLOY_USER}@${DEPLOY_HOST}"
+          common_options=(
+            -i "$key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$known_hosts"
+            -o ConnectTimeout=15
+          )
+
+          scp -P "$DEPLOY_PORT" "${common_options[@]}" \
+            "$archive" "$payload" "$target:/tmp/"
+          scp -P "$DEPLOY_PORT" "${common_options[@]}" \
+            scripts/deploy-from-actions.sh "$target:$remote_script"
+          ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
+            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}'"
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f \
+            "$HOME/.ssh/id_runbow007" \
+            "$HOME/.ssh/known_hosts" \
+            "$RUNNER_TEMP/runbow007-${GITHUB_SHA}.env" \
+            "$RUNNER_TEMP/runbow007-${GITHUB_SHA}.tar.gz"
+
