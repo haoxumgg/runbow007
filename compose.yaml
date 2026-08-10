@@ -1,0 +1,22 @@
+name: runbow007
+
+services:
+  app:
+    build:
+      context: .
+    image: runbow007:local
+    init: true
+    ipc: host
+    env_file:
+      - ${RUNBOW007_SECRETS_FILE:-./secrets.env}
+    environment:
+      TZ: Asia/Shanghai
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      - ./browser-profile:/app/browser-profile
+    security_opt:
+      - no-new-privileges:true

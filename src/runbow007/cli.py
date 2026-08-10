@@ -4,7 +4,10 @@ import argparse
 import getpass
 import logging
 import sys
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import portalocker
 
@@ -12,6 +15,7 @@ from .config import AppConfig
 from .credentials import set_feishu_secret, set_tms_password
 from .downloader import TmsDownloader
 from .pipeline import Pipeline
+from .retention import cleanup_old_downloads
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = AppConfig.load(args.config)
         config.ensure_directories()
-        _configure_logging(config.runtime.logs_dir)
+        _configure_logging(config.runtime.logs_dir, config.runtime.retain_days)
 
         if args.command == "credentials":
             return _credentials(args, config)
@@ -72,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                     expected_ui_total=download.ui_total,
                     send=args.send,
                 )
+            _cleanup_downloads(config)
         print(
             f"运行完成: rows={result.row_count}, candidates={result.candidate_count}, "
             f"sent={result.sent_count}, run_id={result.run_id}"
@@ -106,16 +111,36 @@ def _rules(value: str) -> tuple[str, ...]:
     return tuple(item.strip().upper() for item in value.split(",") if item.strip())
 
 
-def _configure_logging(log_dir: Path) -> None:
+def _configure_logging(log_dir: Path, retain_days: int) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = TimedRotatingFileHandler(
+        log_dir / "runbow007.log",
+        when="midnight",
+        backupCount=retain_days,
+        encoding="utf-8",
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(log_dir / "runbow007.log", encoding="utf-8"),
+            file_handler,
         ],
     )
+
+
+def _cleanup_downloads(config: AppConfig) -> None:
+    try:
+        removed = cleanup_old_downloads(
+            config.runtime.downloads_dir,
+            retain_days=config.runtime.retain_days,
+            now=datetime.now(ZoneInfo(config.runtime.timezone)),
+        )
+    except OSError:
+        logging.getLogger(__name__).warning("清理过期下载文件失败", exc_info=True)
+        return
+    if removed:
+        logging.getLogger(__name__).info("已清理 %s 个过期下载文件", removed)
 
 
 if __name__ == "__main__":  # pragma: no cover

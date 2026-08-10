@@ -1,6 +1,6 @@
 # runbow007
 
-李宁 TMS 订单提醒的轻量自动化程序：一台 Windows 主机、一个 Python 程序、一个 SQLite 文件。
+李宁 TMS 订单提醒的轻量自动化程序：支持 Windows 本地运行，也支持在 Alibaba Cloud Linux 3 上以单容器部署，数据仍只使用一个 SQLite 文件。
 
 ## 已实现
 
@@ -37,7 +37,7 @@
 
 “是否延迟=是”且“延迟原因”为空、空字符串或全空格。
 
-## 安装
+## Windows 本地安装
 
 PowerShell：
 
@@ -50,7 +50,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 安装脚本会创建 `.venv`、安装项目依赖和 Playwright Chromium，并复制 `config.example.yaml` 为 `config.yaml`。
 
-## 配置
+## 通用配置
 
 1. 编辑 `config.yaml`：
    - 填写 `tms.username`；
@@ -58,7 +58,7 @@ Set-ExecutionPolicy -Scope Process Bypass
    - 保留已确认群 ID `oc_f79000009c4f09cbdf78b55fd35ae04a`；
    - `mention_user_id` 可留空，只发送普通群消息；需要真正 @ 时再填写飞书 `open_id` 或 `user_id`；
    - 首次联调时校准 TMS 页面选择器。
-2. 将密码保存到 Windows 凭据管理器：
+2. Windows 将密码保存到凭据管理器：
 
 ```powershell
 .\.venv\Scripts\runbow007.exe --config config.yaml credentials set-tms
@@ -116,6 +116,95 @@ tms:
 
 不传 `-EnableSending` 时，定时任务只演练不发送。
 
+## Alibaba Cloud Linux 3 部署
+
+推荐在 Alibaba Cloud Linux 3.2104 上使用 Docker。宿主机只负责 systemd 定时器，Python、Playwright 和 Chromium 均封装在一个基于 Debian 12 的镜像中，不需要替换系统自带 Python。
+
+### 1. 准备服务器
+
+按照阿里云文档安装 Docker CE 和 Docker Compose 插件，并确认 Docker 已启动：
+
+```bash
+sudo systemctl enable --now docker
+docker --version
+docker compose version
+```
+
+服务器不需要开放入站端口。构建时需要访问 PyPI 和浏览器下载源；运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
+
+### 2. 部署代码
+
+```bash
+sudo git clone https://github.com/haoxumgg/runbow007.git /opt/runbow007
+cd /opt/runbow007
+sudo ./scripts/deploy-alinux3.sh
+```
+
+脚本会构建镜像、创建持久化目录并安装 systemd 文件，但首次不会启动定时器。以下目录由 UID `10001` 的容器用户写入：
+
+```text
+/opt/runbow007/data
+/opt/runbow007/downloads
+/opt/runbow007/logs
+/opt/runbow007/browser-profile
+```
+
+### 3. 填写非敏感配置和密钥
+
+编辑 `/opt/runbow007/config.yaml`，填写 TMS 账号、飞书 App ID 和群 ID。密码和 App Secret 只写到 `/etc/runbow007/secrets.env`，值建议使用单引号包裹：
+
+```bash
+sudo vi /etc/runbow007/secrets.env
+sudo chmod 600 /etc/runbow007/secrets.env
+```
+
+文件格式：
+
+```dotenv
+RUNBOW007_TMS_PASSWORD='填写实际密码'
+RUNBOW007_FEISHU_APP_SECRET='填写实际密钥'
+```
+
+### 4. 演练并启用定时器
+
+```bash
+# 执行一次完整演练（登录、下载、校验，不发送飞书）
+sudo /opt/runbow007/scripts/run-alinux3.sh hourly
+
+# 确认演练日志
+sudo journalctl -u runbow007-hourly.service -n 200 --no-pager
+
+# 启用 7×24 定时器；此时仍默认不发送飞书
+cd /opt/runbow007
+sudo ./scripts/deploy-alinux3.sh --enable-timers
+systemctl list-timers 'runbow007-*'
+```
+
+定时器安排：
+
+- 每小时第 5 分钟执行 R1/R3/R4；
+- 每天 13:30（Asia/Shanghai）执行 R2；
+- 周末照常运行；
+- 服务器重启后自动恢复，错过的任务会补跑；
+- 原有文件锁继续阻止两个任务并发执行。
+
+正式发送前，编辑 `/etc/runbow007/runtime.env`：
+
+```dotenv
+RUNBOW007_ENABLE_SENDING=true
+```
+
+修改后下一次定时运行自动携带 `--send`。首次部署必须保持 `false`，完成候选数量核对后再开启。
+
+常用运维命令：
+
+```bash
+systemctl status runbow007-hourly.timer runbow007-arrival.timer
+sudo systemctl start runbow007-hourly.service
+sudo journalctl -u runbow007-hourly.service -f
+sudo systemctl disable --now runbow007-hourly.timer runbow007-arrival.timer
+```
+
 ## 常用命令
 
 ```powershell
@@ -131,14 +220,14 @@ runbow007 --config config.yaml run --dataset open_carryover --rules R1,R3,R4
 
 ## 数据安全
 
-- 账号密码和飞书 App Secret 保存在 Windows 凭据管理器；
+- Windows 将账号密码和飞书 App Secret 保存在凭据管理器；Linux 从权限为 `600` 的服务器密钥文件注入环境变量；
 - 原始 Excel、SQLite、日志和浏览器配置目录均被 `.gitignore` 排除；
-- Excel 默认保留 30 天；清理可由 Windows 任务或企业运维策略执行；
+- Excel 按 `retain_days` 自动清理，默认保留 30 天；日志按天轮转并保留相同天数；
 - 每次运行记录文件 SHA-256、行数、候选数、发送数和失败原因。
 
 ## 开发检查
 
-```powershell
+```bash
 python -m ruff check .
 python -m pytest
 ```
