@@ -33,3 +33,33 @@ def test_linux_runtime_defaults_to_dry_run():
     runtime = (ROOT / "deploy" / "runtime.env.example").read_text(encoding="utf-8")
 
     assert "RUNBOW007_ENABLE_SENDING=false" in runtime
+
+
+def test_github_deploy_is_manual_and_safe_by_default():
+    workflow = yaml.load(
+        (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    trigger = workflow["on"]
+    inputs = trigger["workflow_dispatch"]["inputs"]
+
+    assert set(trigger) == {"workflow_dispatch"}
+    assert inputs["run_smoke_test"]["default"] == "true"
+    assert inputs["enable_timers"]["default"] == "false"
+    assert workflow["permissions"] == {"contents": "read"}
+
+
+def test_github_deploy_pins_host_key_and_never_enables_sending():
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    remote_script = (ROOT / "scripts" / "deploy-from-actions.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "StrictHostKeyChecking=yes" in workflow
+    assert "DEPLOY_KNOWN_HOSTS" in workflow
+    assert "workflow_dispatch" in workflow
+    assert "RUNBOW007_ENABLE_SENDING=true" not in workflow
+    assert "RUNBOW007_ENABLE_SENDING=true" not in remote_script
+
