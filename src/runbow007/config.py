@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,9 @@ class AppConfig:
         tms_values = _known_values(TmsConfig, tms_raw, exclude={"selectors"})
         tms = TmsConfig(**tms_values, selectors=selectors)
         feishu = FeishuConfig(**_known_values(FeishuConfig, feishu_raw))
+        tms.username = _environment_value("RUNBOW007_TMS_USERNAME", tms.username)
+        feishu.app_id = _environment_value("RUNBOW007_FEISHU_APP_ID", feishu.app_id)
+        feishu.chat_id = _environment_value("RUNBOW007_FEISHU_CHAT_ID", feishu.chat_id)
         enabled = tuple(
             str(item).upper() for item in rules_raw.get("enabled", RulesConfig().enabled)
         )
@@ -163,9 +167,15 @@ def _path(base: Path, value: str | Path) -> Path:
     return path.resolve() if path.is_absolute() else (base / path).resolve()
 
 
+def _environment_value(name: str, fallback: str) -> str:
+    value = os.getenv(name)
+    return value.strip() if value and value.strip() else fallback
+
+
 def _known_values(
     data_class: type[Any], values: dict[str, Any], *, exclude: set[str] | None = None
 ) -> dict[str, Any]:
     exclude = exclude or set()
     allowed = set(data_class.__dataclass_fields__) - exclude
     return {key: value for key, value in values.items() if key in allowed}
+
