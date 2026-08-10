@@ -136,7 +136,8 @@ class Pipeline:
         source = source.resolve()
         if not source.exists():
             return source
-        target_dir = self.config.runtime.downloads_dir / datetime.now().strftime("%Y%m%d")
+        local_now = datetime.now(ZoneInfo(self.config.runtime.timezone))
+        target_dir = self.config.runtime.downloads_dir / local_now.strftime("%Y%m%d")
         target_dir.mkdir(parents=True, exist_ok=True)
         try:
             source.relative_to(self.config.runtime.downloads_dir)

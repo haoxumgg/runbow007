@@ -12,7 +12,7 @@ runtime:
 
 tms:
   url: https://otb.lining.com/#/
-  # 只写账号，密码通过 credentials set-tms 保存到 Windows 凭据管理器。
+  # 只写账号。Windows 使用凭据管理器；Linux 使用 RUNBOW007_TMS_PASSWORD。
   username: ""
   headless: true
   navigation_timeout_seconds: 45
@@ -34,7 +34,7 @@ tms:
     download_button: "button:has(.thorn6-icon-daoru)"
 
 feishu:
-  # 自建应用 App ID；App Secret 通过 credentials set-feishu 保存。
+  # 自建应用 App ID。Linux 通过 RUNBOW007_FEISHU_APP_SECRET 提供密钥。
   app_id: ""
   chat_id: oc_f79000009c4f09cbdf78b55fd35ae04a
   # 可选：留空时只发普通群消息；填写 open_id/user_id 后才会真正 @。

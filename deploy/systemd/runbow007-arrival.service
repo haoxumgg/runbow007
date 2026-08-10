@@ -1,0 +1,12 @@
+[Unit]
+Description=Runbow007 daily expected-arrival reminder check
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/runbow007
+EnvironmentFile=/etc/runbow007/runtime.env
+ExecStart=/opt/runbow007/scripts/run-alinux3.sh arrival
+TimeoutStartSec=15min

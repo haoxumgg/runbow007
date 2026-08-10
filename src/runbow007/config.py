@@ -130,6 +130,8 @@ class AppConfig:
             raise ConfigError("rules.unresolved_repeat_hour 必须在 0 到 23 之间")
         if not 1 <= self.feishu.max_orders_per_message <= 100:
             raise ConfigError("feishu.max_orders_per_message 必须在 1 到 100 之间")
+        if not 1 <= self.runtime.retain_days <= 3650:
+            raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):
             raise ConfigError("tms.url 必须使用 HTTPS")
         if sending:

@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.deps
+.tmp
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+config.yaml
+secrets.env
+runtime.env
+data
+downloads
+logs
+browser-profile
+tests

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+enable_timers=false
+if [[ "${1:-}" == "--enable-timers" ]]; then
+  enable_timers=true
+elif [[ -n "${1:-}" ]]; then
+  echo "用法: sudo $0 [--enable-timers]" >&2
+  exit 2
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "请使用 sudo 执行部署脚本" >&2
+  exit 1
+fi
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "$project_root" != "/opt/runbow007" ]]; then
+  echo "请将仓库部署到 /opt/runbow007，当前路径: $project_root" >&2
+  exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "未安装 Docker，请先按阿里云 Alibaba Cloud Linux 3 文档安装 Docker CE。" >&2
+  exit 1
+fi
+docker compose version >/dev/null
+
+install -d -m 0750 /etc/runbow007
+if [[ ! -f /etc/runbow007/secrets.env ]]; then
+  install -m 0600 deploy/secrets.env.example /etc/runbow007/secrets.env
+fi
+if [[ ! -f /etc/runbow007/runtime.env ]]; then
+  install -m 0640 deploy/runtime.env.example /etc/runbow007/runtime.env
+fi
+if [[ ! -f config.yaml ]]; then
+  install -m 0644 config.example.yaml config.yaml
+fi
+
+install -d -m 0750 data downloads logs browser-profile
+chown -R 10001:10001 data downloads logs browser-profile
+chmod +x scripts/run-alinux3.sh scripts/deploy-alinux3.sh
+
+export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
+docker compose --project-directory "$project_root" build app
+
+install -m 0644 deploy/systemd/runbow007-hourly.service /etc/systemd/system/
+install -m 0644 deploy/systemd/runbow007-hourly.timer /etc/systemd/system/
+install -m 0644 deploy/systemd/runbow007-arrival.service /etc/systemd/system/
+install -m 0644 deploy/systemd/runbow007-arrival.timer /etc/systemd/system/
+systemctl daemon-reload
+
+if $enable_timers; then
+  systemctl enable --now runbow007-hourly.timer runbow007-arrival.timer
+  echo "定时器已启用。"
+else
+  echo "镜像和 systemd 文件已安装，但定时器尚未启动。"
+  echo "请填写 config.yaml 和 /etc/runbow007/secrets.env，完成演练后再执行："
+  echo "sudo scripts/deploy-alinux3.sh --enable-timers"
+fi

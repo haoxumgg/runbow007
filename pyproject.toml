@@ -13,7 +13,7 @@ authors = [{ name = "haoxumgg" }]
 dependencies = [
   "keyring>=25,<26",
   "openpyxl>=3.1,<4",
-  "playwright>=1.48,<2",
+  "playwright==1.62.0",
   "portalocker>=3,<4",
   "PyYAML>=6,<7",
   "requests>=2.32,<3",

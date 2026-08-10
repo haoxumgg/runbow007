@@ -13,6 +13,8 @@ dist/
 *.egg-info/
 
 config.yaml
+secrets.env
+runtime.env
 data/
 downloads/
 logs/

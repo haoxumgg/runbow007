@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import AppConfig
 from .credentials import CredentialError, get_tms_password
@@ -56,7 +57,7 @@ class TmsDownloader:
 
         self.config.ensure_directories()
         password = get_tms_password(self.config.tms.username)
-        run_dir = self.config.runtime.downloads_dir / datetime.now().strftime("%Y%m%d")
+        run_dir = self.config.runtime.downloads_dir / self._local_now().strftime("%Y%m%d")
         run_dir.mkdir(parents=True, exist_ok=True)
 
         with sync_playwright() as playwright:
@@ -76,7 +77,7 @@ class TmsDownloader:
             button = self._locator_or_button(
                 page, self.config.tms.selectors.download_button, r"下载|批量导出"
             )
-            export_started = datetime.now()
+            export_started = self._local_now()
             button.click()
             self._confirm_export(page)
             download = self._download_from_center(page, export_started, ui_total)
@@ -150,7 +151,7 @@ class TmsDownloader:
             page.locator(preset_trigger).first.click()
             self._click_visible_text(page, preset)
         if dataset == "current_month" and selectors.date_from_input:
-            month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d 00:00")
+            month_start = self._local_now().replace(day=1).strftime("%Y-%m-%d 00:00")
             page.locator(selectors.date_from_input).first.fill(month_start)
         query = self._locator_or_button(page, selectors.query_button, r"查询")
         query.click()
@@ -167,6 +168,10 @@ class TmsDownloader:
         text = page.locator(selector).first.inner_text()
         match = re.search(r"([\d,]+)", text)
         return int(match.group(1).replace(",", "")) if match else None
+
+    def _local_now(self) -> datetime:
+        # TMS 下载中心显示的是配置时区的无时区时间，统一成同口径后再比较。
+        return datetime.now(ZoneInfo(self.config.runtime.timezone)).replace(tzinfo=None)
 
     def _confirm_export(self, page: object) -> None:
         confirms = page.get_by_role("button", name="确定")

@@ -1,4 +1,6 @@
 from datetime import datetime
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from runbow007.downloader import TmsDownloader
 
@@ -26,3 +28,13 @@ def test_parse_incomplete_download_center_row():
 
     assert started_at is None
     assert record_count is None
+
+
+def test_downloader_uses_configured_timezone():
+    config = SimpleNamespace(runtime=SimpleNamespace(timezone="Asia/Shanghai"))
+
+    now = TmsDownloader(config)._local_now()
+
+    assert now.tzinfo is None
+    expected = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    assert abs((expected - now).total_seconds()) < 5

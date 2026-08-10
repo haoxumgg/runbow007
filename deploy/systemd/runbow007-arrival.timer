@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Runbow007 arrival check daily at 13:30 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 13:30:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=runbow007-arrival.service
+
+[Install]
+WantedBy=timers.target
