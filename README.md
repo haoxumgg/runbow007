@@ -132,6 +132,30 @@ docker compose version
 
 服务器不需要开放入站端口。构建时需要访问 PyPI 和浏览器下载源；运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
 
+### 使用 GitHub Actions 部署（推荐）
+
+仓库包含手动工作流 `.github/workflows/deploy.yml`。它会校验固定 SSH 主机密钥、上传当前 commit、在 `/opt/runbow007` 构建镜像，并默认执行一次不会发送飞书消息的真实下载演练。它不会因 push 自动部署。
+
+先在仓库 `Settings → Secrets and variables → Actions` 配置：
+
+Repository variables：
+
+- `DEPLOY_HOST`：服务器 IP 或域名；
+- `DEPLOY_USER`：拥有免密 `sudo` 的 SSH 用户，或 `root`；
+- `DEPLOY_PORT`：SSH 端口，不填时使用 `22`；
+- `RUNBOW007_TMS_USERNAME`：李宁 TMS 账号；
+- `RUNBOW007_FEISHU_APP_ID`：飞书应用 App ID；
+- `RUNBOW007_FEISHU_CHAT_ID`：接收消息的飞书群 ID。
+
+Repository secrets：
+
+- `DEPLOY_SSH_PRIVATE_KEY`：与服务器 `authorized_keys` 匹配的完整私钥；
+- `DEPLOY_KNOWN_HOSTS`：经过人工核对的服务器 `known_hosts` 完整记录；
+- `RUNBOW007_TMS_PASSWORD`：李宁 TMS 密码；
+- `RUNBOW007_FEISHU_APP_SECRET`：飞书应用 App Secret。
+
+然后打开 `Actions → deploy → Run workflow`。首次保持 `run_smoke_test=true`、`enable_timers=false`；候选数量验收后再单独启用定时器。无论是否启用定时器，部署流程都不会把 `RUNBOW007_ENABLE_SENDING` 改为 `true`。
+
 ### 2. 部署代码
 
 ```bash
@@ -158,11 +182,14 @@ sudo vi /etc/runbow007/secrets.env
 sudo chmod 600 /etc/runbow007/secrets.env
 ```
 
-文件格式：
+文件格式（账号和 App ID 也可以像 GitHub Actions 一样通过环境变量提供）：
 
 ```dotenv
+RUNBOW007_TMS_USERNAME='填写账号'
 RUNBOW007_TMS_PASSWORD='填写实际密码'
+RUNBOW007_FEISHU_APP_ID='填写 App ID'
 RUNBOW007_FEISHU_APP_SECRET='填写实际密钥'
+RUNBOW007_FEISHU_CHAT_ID='填写群 ID'
 ```
 
 ### 4. 演练并启用定时器
@@ -231,3 +258,4 @@ runbow007 --config config.yaml run --dataset open_carryover --rules R1,R3,R4
 python -m ruff check .
 python -m pytest
 ```
+
