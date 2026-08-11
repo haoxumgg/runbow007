@@ -35,7 +35,7 @@ runbow007 = "runbow007.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --cov=runbow007 --cov-report=term-missing --cov-fail-under=75"
 testpaths = ["tests"]
 pythonpath = ["src"]
 
