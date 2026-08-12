@@ -186,3 +186,66 @@ def test_read_total_and_locator_fallback(app_config):
     app_config.tms.selectors.total_count = ""
     assert downloader._read_total(FakePage()) is None
     assert downloader._locator_or_button(FakePage(), "", r"下载") == "fallback-button"
+
+
+def test_confirm_export_accepts_disappeared_success_toast(app_config, monkeypatch):
+    class Item:
+        def __init__(self, *, visible=False):
+            self.visible = visible
+            self.clicked = False
+
+        def is_visible(self, *, timeout):
+            assert timeout == 500
+            return self.visible
+
+        def click(self):
+            self.clicked = True
+
+    class Collection:
+        def __init__(self, items):
+            self.items = items
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    confirm = Item(visible=True)
+    success = Item(visible=False)
+
+    class FakePage:
+        def get_by_role(self, role, *, name):
+            return Collection([confirm])
+
+        def get_by_text(self, text, *, exact):
+            return Collection([success])
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 250
+
+    timeline = iter((0, 0, 0, 11))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+
+    TmsDownloader(app_config)._confirm_export(FakePage())
+
+    assert confirm.clicked is True
+
+
+def test_confirm_export_still_requires_confirmation_dialog(app_config, monkeypatch):
+    class EmptyCollection:
+        def count(self):
+            return 0
+
+    class FakePage:
+        def get_by_role(self, role, *, name):
+            return EmptyCollection()
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 250
+
+    timeline = iter((0, 0, 16))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+
+    with pytest.raises(TmsDownloadError, match="未出现确认窗口"):
+        TmsDownloader(app_config)._confirm_export(FakePage())
