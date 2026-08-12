@@ -282,4 +282,3 @@ def test_force_click_uses_dom_click_when_toast_covers_menu(app_config):
     )
 
     assert evaluated == ["element => element.click()"]
-

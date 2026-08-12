@@ -149,4 +149,3 @@ def test_cleanup_downloads_tolerates_os_error(app_config, monkeypatch):
 
     monkeypatch.setattr(cli, "cleanup_old_downloads", fail)
     cli._cleanup_downloads(app_config)
-

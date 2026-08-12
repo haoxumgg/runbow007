@@ -176,4 +176,3 @@ def test_pipeline_rejects_unknown_or_disabled_rules(app_config):
     app_config.rules.enabled = ("R1",)
     with pytest.raises(ValueError, match="请求的规则均未启用"):
         pipeline.process_file("missing.xlsx", rule_codes=["R4"])
-

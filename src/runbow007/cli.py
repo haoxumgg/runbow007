@@ -164,4 +164,3 @@ def _cleanup_downloads(config: AppConfig) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

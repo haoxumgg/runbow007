@@ -108,4 +108,3 @@ def test_actions_deploy_can_bootstrap_docker_on_ubuntu_2404():
     assert "/etc/apt/sources.list.d/docker.sources" in remote_script
     assert "docker-buildx-plugin docker-compose-plugin" in remote_script
 
-
