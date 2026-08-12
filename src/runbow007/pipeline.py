@@ -35,6 +35,7 @@ class Pipeline:
         rule_codes: Iterable[str] | None = None,
         expected_ui_total: int | None = None,
         send: bool | None = None,
+        max_send_orders: int | None = None,
     ) -> RunResult:
         now = datetime.now(ZoneInfo(self.config.runtime.timezone))
         requested = tuple(code.upper() for code in (rule_codes or self.config.rules.enabled))
@@ -45,6 +46,11 @@ class Pipeline:
         if not selected:
             raise ValueError("请求的规则均未启用")
         should_send = (not self.config.runtime.dry_run) if send is None else send
+        if max_send_orders is not None:
+            if not should_send:
+                raise ValueError("小批量发送限制必须与真实发送同时启用")
+            if not 1 <= max_send_orders <= 5:
+                raise ValueError("小批量发送只能限制为 1–5 个唯一订单")
         run_id = uuid.uuid4().hex
         archived = self._archive_source(Path(source_file), run_id)
         digest = _sha256(archived)
@@ -60,9 +66,10 @@ class Pipeline:
                 observed_order_nos=(order.order_no for order in parsed.orders),
                 seen_at=now,
             )
+            send_scope = _limit_unique_orders(candidates, max_send_orders)
             sendable = [
                 item
-                for item in candidates
+                for item in send_scope
                 if self.store.should_send(
                     item,
                     now=now,
@@ -167,3 +174,26 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _limit_unique_orders(
+    candidates: list[ReminderCandidate], max_orders: int | None
+) -> list[ReminderCandidate]:
+    if max_orders is None:
+        return candidates
+    selected_order_nos: set[str] = set()
+    limited: list[ReminderCandidate] = []
+    for candidate in candidates:
+        order_no = candidate.order.order_no
+        if order_no not in selected_order_nos:
+            if len(selected_order_nos) >= max_orders:
+                continue
+            selected_order_nos.add(order_no)
+        limited.append(candidate)
+    logger.info(
+        "小批量发送保护已启用：候选唯一订单=%s，最多发送唯一订单=%s",
+        len({item.order.order_no for item in candidates}),
+        max_orders,
+    )
+    return limited
+

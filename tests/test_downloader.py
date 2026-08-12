@@ -249,3 +249,37 @@ def test_confirm_export_still_requires_confirmation_dialog(app_config, monkeypat
 
     with pytest.raises(TmsDownloadError, match="未出现确认窗口"):
         TmsDownloader(app_config)._confirm_export(FakePage())
+
+
+def test_force_click_uses_dom_click_when_toast_covers_menu(app_config):
+    evaluated = []
+
+    class Candidate:
+        def is_visible(self):
+            return True
+
+        def evaluate(self, expression):
+            evaluated.append(expression)
+
+        def click(self):
+            raise AssertionError("covered menu must not use a pointer click")
+
+    class Matches:
+        def count(self):
+            return 1
+
+        def nth(self, index):
+            assert index == 0
+            return Candidate()
+
+    class FakePage:
+        def get_by_text(self, text, *, exact):
+            assert (text, exact) == ("下载中心", True)
+            return Matches()
+
+    TmsDownloader(app_config)._click_visible_text(
+        FakePage(), "下载中心", force=True
+    )
+
+    assert evaluated == ["element => element.click()"]
+
