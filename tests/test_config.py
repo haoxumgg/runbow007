@@ -7,12 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_server_identity_values_can_come_from_environment(monkeypatch):
     monkeypatch.setenv("RUNBOW007_TMS_USERNAME", "server-user")
+    monkeypatch.setenv("RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS", "600")
     monkeypatch.setenv("RUNBOW007_FEISHU_APP_ID", "server-app")
     monkeypatch.setenv("RUNBOW007_FEISHU_CHAT_ID", "server-chat")
 
     config = AppConfig.load(ROOT / "config.example.yaml")
 
     assert config.tms.username == "server-user"
+    assert config.tms.download_timeout_seconds == 600
     assert config.feishu.app_id == "server-app"
     assert config.feishu.chat_id == "server-chat"
 

@@ -16,6 +16,7 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert "./data:/app/data" in volumes
     assert "./downloads:/app/downloads" in volumes
     assert "./browser-profile:/app/browser-profile" in volumes
+    assert app["environment"]["RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS"] == "600"
 
 
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
