@@ -36,12 +36,13 @@ class TmsDownloader:
 
     def download(self, dataset: str = "current_month") -> DownloadResult:
         last_error: Exception | None = None
+        export_not_before = self._local_now()
         for attempt, delay in enumerate((0, 60, 180), start=1):
             if delay:
                 logger.warning("第 %s 次下载失败，%s 秒后重试", attempt - 1, delay)
                 time.sleep(delay)
             try:
-                return self._download_once(dataset)
+                return self._download_once(dataset, export_not_before=export_not_before)
             except (CredentialError, TmsAuthenticationError):
                 raise
             except Exception as exc:  # browser errors are normalized at the boundary
@@ -49,7 +50,9 @@ class TmsDownloader:
                 logger.exception("TMS 下载第 %s 次失败", attempt)
         raise TmsDownloadError(f"TMS 下载连续三次失败: {last_error}") from last_error
 
-    def _download_once(self, dataset: str) -> DownloadResult:
+    def _download_once(
+        self, dataset: str, *, export_not_before: datetime | None = None
+    ) -> DownloadResult:
         try:
             from playwright.sync_api import Page, sync_playwright
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -82,7 +85,7 @@ class TmsDownloader:
             button = self._locator_or_button(
                 page, self.config.tms.selectors.download_button, r"下载|批量导出"
             )
-            export_started = self._local_now()
+            export_started = export_not_before or self._local_now()
             button.click()
             logger.info("已点击导出，等待确认窗口")
             self._confirm_export(page)

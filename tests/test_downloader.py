@@ -55,7 +55,10 @@ def test_download_retries_then_succeeds(app_config, monkeypatch):
     outcomes = [RuntimeError("temporary"), RuntimeError("temporary"), expected]
     sleeps = []
 
-    def attempt(dataset):
+    attempts = []
+
+    def attempt(dataset, *, export_not_before):
+        attempts.append(export_not_before)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -66,6 +69,7 @@ def test_download_retries_then_succeeds(app_config, monkeypatch):
 
     assert downloader.download() == expected
     assert sleeps == [60, 180]
+    assert attempts[0] == attempts[1] == attempts[2]
 
 
 @pytest.mark.parametrize("error", [CredentialError("missing"), TmsAuthenticationError("bad")])
@@ -73,7 +77,7 @@ def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, 
     downloader = TmsDownloader(app_config)
     calls = 0
 
-    def fail(dataset):
+    def fail(dataset, *, export_not_before):
         nonlocal calls
         calls += 1
         raise error
@@ -87,7 +91,9 @@ def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, 
 def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
     downloader = TmsDownloader(app_config)
     monkeypatch.setattr(
-        downloader, "_download_once", lambda dataset: (_ for _ in ()).throw(OSError("browser"))
+        downloader,
+        "_download_once",
+        lambda dataset, *, export_not_before: (_ for _ in ()).throw(OSError("browser")),
     )
     monkeypatch.setattr("runbow007.downloader.time.sleep", lambda seconds: None)
 
