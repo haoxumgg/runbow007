@@ -61,6 +61,7 @@ class TmsDownloader:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         with sync_playwright() as playwright:
+            logger.info("启动 TMS 浏览器")
             context = playwright.chromium.launch_persistent_context(
                 str(self.config.runtime.browser_profile_dir),
                 headless=self.config.tms.headless,
@@ -69,22 +70,29 @@ class TmsDownloader:
             page: Page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(self.config.tms.navigation_timeout_seconds * 1000)
             page.goto(self.config.tms.url, wait_until="domcontentloaded")
+            logger.info("TMS 首页已加载，检查登录状态")
             self._login_if_needed(page, password)
+            logger.info("TMS 登录状态确认完成，打开集团订单管理")
             self._open_order_page(page)
+            logger.info("集团订单管理已打开，应用数据筛选")
             self._apply_filters(page, dataset)
             ui_total = self._read_total(page)
+            logger.info("TMS 筛选完成，页面订单总数=%s", ui_total)
 
             button = self._locator_or_button(
                 page, self.config.tms.selectors.download_button, r"下载|批量导出"
             )
             export_started = self._local_now()
             button.click()
+            logger.info("已点击导出，等待确认窗口")
             self._confirm_export(page)
+            logger.info("导出任务已创建，进入下载中心核验")
             download = self._download_from_center(page, export_started, ui_total)
             suggested = Path(download.suggested_filename)
             suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
             target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
             download.save_as(target)
+            logger.info("TMS Excel 已保存: %s", target.name)
             context.close()
 
         if not target.exists() or target.stat().st_size == 0:
