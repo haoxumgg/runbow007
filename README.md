@@ -136,7 +136,7 @@ docker compose version
 
 仓库包含手动工作流 `.github/workflows/deploy.yml`。它会校验固定 SSH 主机密钥、上传当前 commit、在 `/opt/runbow007` 构建镜像，并默认执行一次不会发送飞书消息的真实下载演练。它不会因 push 自动部署。
 
-先在仓库 `Settings → Secrets and variables → Actions` 配置：
+工作流会在 Alibaba Cloud Linux 3 首次部署时按阿里云官方软件源安装 Docker CE、Buildx 和 Compose 插件；已安装时会直接跳过。然后在仓库 `Settings → Secrets and variables → Actions` 配置：
 
 Repository variables：
 

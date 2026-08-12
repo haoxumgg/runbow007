@@ -47,9 +47,28 @@ if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   exit 1
 fi
 if ! command -v docker >/dev/null 2>&1; then
-  echo "服务器尚未安装 Docker；请先安装 Docker CE 和 Compose 插件。" >&2
-  exit 1
+  if [[ ! -r /etc/os-release ]]; then
+    echo "服务器未安装 Docker，且无法识别操作系统。" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  if [[ "${ID:-}" != "alinux" || "${VERSION_ID%%.*}" != "3" ]]; then
+    echo "仅支持在 Alibaba Cloud Linux 3 上自动安装 Docker，当前系统: ${PRETTY_NAME:-未知}" >&2
+    exit 1
+  fi
+  echo "检测到 Alibaba Cloud Linux 3，按阿里云官方方式安装 Docker CE 和 Compose。"
+  dnf -y install wget
+  wget -qO /etc/yum.repos.d/docker-ce.repo \
+    http://mirrors.cloud.aliyuncs.com/docker-ce/linux/centos/docker-ce.repo
+  sed -i \
+    's|https://mirrors.aliyun.com|http://mirrors.cloud.aliyuncs.com|g' \
+    /etc/yum.repos.d/docker-ce.repo
+  dnf -y install dnf-plugin-releasever-adapter --repo alinux3-plus
+  dnf -y install \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
+systemctl enable --now docker
 docker compose version >/dev/null
 
 install -d -m 0755 "$project_root"
