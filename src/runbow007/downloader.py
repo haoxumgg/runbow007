@@ -180,7 +180,7 @@ class TmsDownloader:
         while time.monotonic() < deadline:
             for index in range(confirms.count()):
                 confirm = confirms.nth(index)
-                if confirm.is_visible():
+                if confirm.is_visible(timeout=500):
                     confirm.click()
                     clicked = True
                     break
@@ -191,14 +191,17 @@ class TmsDownloader:
             raise TmsDownloadError("点击导出后未出现确认窗口")
 
         success = page.get_by_text("下载任务添加成功", exact=False)
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if any(
-                success.nth(index).is_visible() for index in range(success.count())
+                success.nth(index).is_visible(timeout=500)
+                for index in range(success.count())
             ):
                 return
             page.wait_for_timeout(250)
-        raise TmsDownloadError("TMS 未确认创建下载任务")
+        # 成功提示是短暂 toast，页面响应慢时可能在定位前已消失。下载中心的
+        # 最新任务时间、状态和条数才是最终确认依据，因此这里继续轮询下载中心。
+        logger.info("未捕获到导出成功提示，继续在下载中心核验任务")
 
     def _download_from_center(
         self, page: object, export_started: datetime, expected_total: int | None
