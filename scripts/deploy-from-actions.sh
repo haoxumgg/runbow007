@@ -4,6 +4,7 @@ set -euo pipefail
 commit_sha="${1:-}"
 run_smoke_test="${2:-true}"
 enable_timers="${3:-false}"
+feishu_test_orders="${4:-0}"
 
 if [[ ! "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "无效的 Git commit SHA。" >&2
@@ -15,6 +16,14 @@ for value in "$run_smoke_test" "$enable_timers"; do
     exit 2
   fi
 done
+if [[ "$feishu_test_orders" != "0" && "$feishu_test_orders" != "3" && "$feishu_test_orders" != "5" ]]; then
+  echo "飞书测试订单数只能是 0、3 或 5。" >&2
+  exit 2
+fi
+if [[ "$feishu_test_orders" != "0" && "$run_smoke_test" != "true" ]]; then
+  echo "真实飞书小批量测试前必须先完成本轮下载演练。" >&2
+  exit 2
+fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
   if ! command -v sudo >/dev/null 2>&1; then
@@ -109,6 +118,11 @@ chmod +x scripts/deploy-alinux3.sh scripts/deploy-from-actions.sh scripts/run-al
 if [[ "$run_smoke_test" == "true" ]]; then
   echo "执行一次真实下载演练；RUNBOW007_ENABLE_SENDING 保持 false。"
   ./scripts/run-alinux3.sh hourly
+fi
+
+if [[ "$feishu_test_orders" != "0" ]]; then
+  echo "执行 R3 真实群消息小批量测试，硬限制为 ${feishu_test_orders} 个唯一订单。"
+  bash ./scripts/send-smoke-alinux3.sh "$feishu_test_orders"
 fi
 
 if [[ "$enable_timers" == "true" ]]; then

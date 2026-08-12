@@ -283,16 +283,9 @@ class TmsDownloader:
                 candidate = matches.nth(index)
                 if candidate.is_visible():
                     if force:
-                        # 成功提示会长期覆盖菜单中心，点击右侧未被遮挡的边缘。
-                        box = candidate.bounding_box()
-                        if not box:
-                            raise TmsDownloadError(f"页面元素没有可点击区域: {text}")
-                        candidate.click(
-                            position={
-                                "x": max(1, box["width"] - 3),
-                                "y": max(1, box["height"] / 2),
-                            }
-                        )
+                        # TMS 的成功提示层可能长期覆盖菜单。这里直接触发已确认
+                        # 可见菜单元素的 DOM click，避免覆盖层截获鼠标事件。
+                        candidate.evaluate("element => element.click()")
                     else:
                         candidate.click()
                     return

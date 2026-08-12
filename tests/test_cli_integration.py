@@ -85,6 +85,18 @@ def test_run_command_uses_download_result(
     )
 
 
+def test_cli_rejects_send_limit_above_safety_cap(capsys):
+    try:
+        cli.build_parser().parse_args(
+            ["process-file", "orders.xlsx", "--send", "--max-send-orders", "6"]
+        )
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("unsafe limit must be rejected")
+    assert "1–5" in capsys.readouterr().err
+
+
 def test_cli_returns_distinct_codes_for_failure_and_lock(app_config, monkeypatch, capsys):
     monkeypatch.setattr(cli.AppConfig, "load", lambda path: app_config)
     _disable_file_lock(monkeypatch)

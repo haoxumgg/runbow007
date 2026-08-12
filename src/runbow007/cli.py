@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--rules", default="R1,R2,R3,R4", help="逗号分隔的规则")
     process.add_argument("--ui-total", type=int, help="TMS 页面显示的总数")
     process.add_argument("--send", action="store_true", help="真实发送飞书")
+    process.add_argument(
+        "--max-send-orders",
+        type=_limited_send_count,
+        help="仅真实发送时生效；固定限制为最多 1–5 个唯一订单",
+    )
 
     run = subparsers.add_parser("run", help="自动登录 TMS、下载并处理")
     run.add_argument(
@@ -37,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--rules", default="R1,R3,R4", help="逗号分隔的规则")
     run.add_argument("--send", action="store_true", help="真实发送飞书")
+    run.add_argument(
+        "--max-send-orders",
+        type=_limited_send_count,
+        help="仅真实发送时生效；固定限制为最多 1–5 个唯一订单",
+    )
 
     credentials = subparsers.add_parser("credentials", help="保存凭据到系统凭据库")
     credentials_sub = credentials.add_subparsers(dest="credential_command", required=True)
@@ -67,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
                     rule_codes=_rules(args.rules),
                     expected_ui_total=args.ui_total,
                     send=args.send,
+                    max_send_orders=args.max_send_orders,
                 )
             else:
                 download = TmsDownloader(config).download(args.dataset)
@@ -75,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                     rule_codes=_rules(args.rules),
                     expected_ui_total=download.ui_total,
                     send=args.send,
+                    max_send_orders=args.max_send_orders,
                 )
             _cleanup_downloads(config)
         print(
@@ -109,6 +121,13 @@ def _credentials(args: argparse.Namespace, config: AppConfig) -> int:
 
 def _rules(value: str) -> tuple[str, ...]:
     return tuple(item.strip().upper() for item in value.split(",") if item.strip())
+
+
+def _limited_send_count(value: str) -> int:
+    count = int(value)
+    if not 1 <= count <= 5:
+        raise argparse.ArgumentTypeError("小批量发送只能限制为 1–5 个唯一订单")
+    return count
 
 
 def _configure_logging(log_dir: Path, retain_days: int) -> None:

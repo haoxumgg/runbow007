@@ -77,6 +77,65 @@ def test_pipeline_sends_in_batches_and_deduplicates_same_day(
     assert [row["message_id"] for row in deliveries] == ["om_1", "om_1", "om_2"]
 
 
+def test_pipeline_limited_send_is_stable_and_never_moves_to_later_orders(
+    tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
+):
+    source = write_orders_xlsx(
+        tmp_path / "orders.xlsx",
+        [
+            make_order(order_no=f"L00{index}", is_delayed=True, delay_reason=None)
+            for index in range(1, 5)
+        ],
+    )
+
+    class FakeClient:
+        def __init__(self, config, *, app_secret):
+            pass
+
+        def send(self, message):
+            return "om_limited"
+
+    monkeypatch.setattr("runbow007.pipeline.get_feishu_secret", lambda app_id: "secret")
+    monkeypatch.setattr("runbow007.pipeline.FeishuClient", FakeClient)
+    pipeline = Pipeline(app_config)
+
+    first = pipeline.process_file(
+        source, rule_codes=["R4"], send=True, max_send_orders=3
+    )
+    second = pipeline.process_file(
+        source, rule_codes=["R4"], send=True, max_send_orders=3
+    )
+
+    assert first.sent_count == 3
+    assert second.sent_count == 0
+    deliveries = _rows(
+        app_config.runtime.database_path,
+        """
+        SELECT DISTINCT reminder_events.order_no
+        FROM deliveries
+        JOIN reminder_events USING(event_key)
+        WHERE deliveries.status = 'sent'
+        ORDER BY reminder_events.order_no
+        """,
+    )
+    assert [row["order_no"] for row in deliveries] == ["L001", "L002", "L003"]
+
+
+@pytest.mark.parametrize("limit", [0, 6])
+def test_pipeline_rejects_unsafe_send_limits(app_config, limit):
+    with pytest.raises(ValueError, match="1–5"):
+        Pipeline(app_config).process_file(
+            "missing.xlsx", rule_codes=["R4"], send=True, max_send_orders=limit
+        )
+
+
+def test_pipeline_rejects_send_limit_in_dry_run(app_config):
+    with pytest.raises(ValueError, match="真实发送"):
+        Pipeline(app_config).process_file(
+            "missing.xlsx", rule_codes=["R4"], send=False, max_send_orders=3
+        )
+
+
 def test_pipeline_records_failed_delivery_and_failed_run(
     tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
 ):
