@@ -63,3 +63,16 @@ def test_github_deploy_pins_host_key_and_never_enables_sending():
     assert "RUNBOW007_ENABLE_SENDING=true" not in workflow
     assert "RUNBOW007_ENABLE_SENDING=true" not in remote_script
 
+
+def test_actions_deploy_can_bootstrap_docker_only_on_alinux3():
+    remote_script = (ROOT / "scripts" / "deploy-from-actions.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"${ID:-}" != "alinux"' in remote_script
+    assert '"${VERSION_ID%%.*}" != "3"' in remote_script
+    assert "dnf-plugin-releasever-adapter --repo alinux3-plus" in remote_script
+    assert "docker-ce docker-ce-cli containerd.io" in remote_script
+    assert "docker-buildx-plugin docker-compose-plugin" in remote_script
+    assert "systemctl enable --now docker" in remote_script
+
