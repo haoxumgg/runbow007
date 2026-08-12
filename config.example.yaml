@@ -16,8 +16,8 @@ tms:
   username: ""
   headless: true
   navigation_timeout_seconds: 45
-  # 真实 3462 单导出约需 5–8 分钟，等待 10 分钟后才重试。
-  download_timeout_seconds: 600
+  # 真实 3462 单导出约需 11–13 分钟，等待 20 分钟后才重试。
+  download_timeout_seconds: 1200
   current_month_preset: AI导出数据（勿动）
   # 李宁 TMS 中配置好历史未完结查询后再填写。
   open_carryover_preset: ""

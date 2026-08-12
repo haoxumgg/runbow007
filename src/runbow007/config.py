@@ -47,7 +47,7 @@ class TmsConfig:
     username: str = ""
     headless: bool = True
     navigation_timeout_seconds: int = 45
-    download_timeout_seconds: int = 600
+    download_timeout_seconds: int = 1200
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
     selectors: TmsSelectors = field(default_factory=TmsSelectors)
