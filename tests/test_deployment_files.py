@@ -60,6 +60,8 @@ def test_github_deploy_pins_host_key_and_never_enables_sending():
     )
 
     assert "StrictHostKeyChecking=yes" in workflow
+    assert "ServerAliveInterval=30" in workflow
+    assert "ServerAliveCountMax=40" in workflow
     assert "DEPLOY_KNOWN_HOSTS" in workflow
     assert "workflow_dispatch" in workflow
     assert "RUNBOW007_ENABLE_SENDING=true" not in workflow

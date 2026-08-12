@@ -154,6 +154,8 @@ jobs:
             -o StrictHostKeyChecking=yes
             -o UserKnownHostsFile="$known_hosts"
             -o ConnectTimeout=15
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=40
           )
 
           scp -P "$DEPLOY_PORT" "${common_options[@]}" \
