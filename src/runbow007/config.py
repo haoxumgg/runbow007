@@ -47,7 +47,7 @@ class TmsConfig:
     username: str = ""
     headless: bool = True
     navigation_timeout_seconds: int = 45
-    download_timeout_seconds: int = 180
+    download_timeout_seconds: int = 600
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
     selectors: TmsSelectors = field(default_factory=TmsSelectors)
@@ -112,6 +112,10 @@ class AppConfig:
         tms = TmsConfig(**tms_values, selectors=selectors)
         feishu = FeishuConfig(**_known_values(FeishuConfig, feishu_raw))
         tms.username = _environment_value("RUNBOW007_TMS_USERNAME", tms.username)
+        tms.download_timeout_seconds = _environment_int(
+            "RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS",
+            tms.download_timeout_seconds,
+        )
         feishu.app_id = _environment_value("RUNBOW007_FEISHU_APP_ID", feishu.app_id)
         feishu.chat_id = _environment_value("RUNBOW007_FEISHU_CHAT_ID", feishu.chat_id)
         enabled = tuple(
@@ -138,6 +142,8 @@ class AppConfig:
             raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):
             raise ConfigError("tms.url 必须使用 HTTPS")
+        if not 60 <= self.tms.download_timeout_seconds <= 1800:
+            raise ConfigError("tms.download_timeout_seconds 必须在 60 到 1800 之间")
         if sending:
             missing = [
                 name
@@ -170,6 +176,11 @@ def _path(base: Path, value: str | Path) -> Path:
 def _environment_value(name: str, fallback: str) -> str:
     value = os.getenv(name)
     return value.strip() if value and value.strip() else fallback
+
+
+def _environment_int(name: str, fallback: int) -> int:
+    value = os.getenv(name)
+    return int(value.strip()) if value and value.strip() else fallback
 
 
 def _known_values(
