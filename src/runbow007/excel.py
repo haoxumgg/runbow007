@@ -148,11 +148,11 @@ def _to_order(row: Sequence[Any], row_number: int, positions: dict[str, int | No
     order_no = _text(value("order_no"))
     if not order_no:
         raise WorkbookValidationError(f"第 {row_number} 行订单号为空")
-    departed_at = _datetime(value("departed_at"), "离厂时间", row_number, required=True)
+    departed_at = _datetime(value("departed_at"), "离厂时间", row_number)
     expected_at = _datetime(
         value("expected_arrival_at"), "预计到达时间", row_number, required=True
     )
-    assert departed_at is not None and expected_at is not None
+    assert expected_at is not None
     return Order(
         order_no=order_no,
         organization=_text(value("organization")),

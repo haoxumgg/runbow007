@@ -86,7 +86,10 @@ class TmsDownloader:
                 page, self.config.tms.selectors.download_button, r"下载|批量导出"
             )
             export_started = export_not_before or self._local_now()
-            button.click()
+            # TMS 是 SPA，导出点击会被 Playwright 识别成一次导航，但页面的
+            # 后台请求不会及时结束。按钮已经生效时继续等待导航反而会误报
+            # 超时；后续仍由确认窗口和下载中心任务做业务结果校验。
+            button.click(no_wait_after=True)
             logger.info("已点击导出，等待确认窗口")
             self._confirm_export(page)
             logger.info("导出任务已创建，进入下载中心核验")
@@ -192,7 +195,9 @@ class TmsDownloader:
             for index in range(confirms.count()):
                 confirm = confirms.nth(index)
                 if confirm.is_visible(timeout=500):
-                    confirm.click()
+                    # 确认按钮会创建后台导出任务，不需要等待 SPA 导航完成。
+                    # 导出是否真正创建仍由成功提示及下载中心任务共同核验。
+                    confirm.click(no_wait_after=True)
                     clicked = True
                     break
             if clicked:

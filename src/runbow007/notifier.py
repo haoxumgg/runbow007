@@ -62,7 +62,11 @@ class MessageFormatter:
         return [{"tag": "text", "text": text}]
 
     def _rule_1(self, candidates: list[ReminderCandidate]) -> list[list[dict[str, Any]]]:
-        lines = [self._text_line(f"共 {len(candidates)} 单，WMS过账距离离厂不足配置阈值。")]
+        lines = [
+            self._text_line(
+                f"共 {len(candidates)} 单，离厂时间为空且WMS过账已超过配置阈值。"
+            )
+        ]
         lines.extend(
             self._text_line(
                 f"- {item.order.order_no}｜箱数 {item.order.box_count}｜{item.reason}"

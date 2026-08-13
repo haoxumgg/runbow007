@@ -23,7 +23,7 @@ class RuleEngine:
         candidates: list[ReminderCandidate] = []
         for order in orders:
             if "R1" in selected:
-                candidate = self._rule_1(order)
+                candidate = self._rule_1(order, now)
                 if candidate:
                     candidates.append(candidate)
             if "R2" in selected:
@@ -40,25 +40,19 @@ class RuleEngine:
                     candidates.append(candidate)
         return candidates
 
-    def _rule_1(self, order: Order) -> ReminderCandidate | None:
-        if order.wms_posted_at is None:
+    def _rule_1(self, order: Order, now: datetime) -> ReminderCandidate | None:
+        if order.departed_at is not None or order.wms_posted_at is None:
             return None
-        lead_minutes = (order.departed_at - order.wms_posted_at).total_seconds() / 60
-        if not 0 <= lead_minutes < self.config.wms_lead_minutes:
+        local_now = now.replace(tzinfo=None) if now.tzinfo is not None else now
+        elapsed_minutes = (local_now - order.wms_posted_at).total_seconds() / 60
+        if elapsed_minutes <= self.config.wms_lead_minutes:
             return None
-        key = "|".join(
-            (
-                "R1",
-                order.order_no,
-                order.departed_at.isoformat(),
-                order.wms_posted_at.isoformat(),
-            )
-        )
+        key = "|".join(("R1", order.order_no, order.wms_posted_at.isoformat()))
         return ReminderCandidate(
             key,
             "R1",
-            "wms_lead_short",
-            f"WMS过账距离离厂仅 {lead_minutes:.1f} 分钟",
+            "departure_missing_overdue",
+            f"WMS过账已 {elapsed_minutes:.1f} 分钟，仍无离厂时间",
             order,
         )
 
