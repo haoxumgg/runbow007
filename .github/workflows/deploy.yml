@@ -3,11 +3,10 @@ name: deploy
 on:
   push:
     branches:
-      - agent/test-r1-feishu
   workflow_dispatch:
     inputs:
       run_smoke_test:
-        description: "部署后执行一次真实下载演练（不会发送飞书消息）"
+        description: "是否重新下载；本次固定跳过"
         required: true
         default: true
         type: boolean
@@ -166,7 +165,7 @@ jobs:
           scp -P "$DEPLOY_PORT" "${common_options[@]}" \
             scripts/deploy-from-actions.sh "$target:$remote_script"
           ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
-            "bash '$remote_script' '$GITHUB_SHA' 'true' 'false' '3'"
+            "bash '$remote_script' '$GITHUB_SHA' 'false' 'false' '3'"
 
       - name: Remove temporary credentials
         if: always()
