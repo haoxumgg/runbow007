@@ -28,6 +28,10 @@ stat -c "验收Excel时间=%y 大小=%s字节" "$latest_file"
 
 cd "$project_root"
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
-exec /usr/bin/docker compose --project-directory "$project_root" \
+/usr/bin/docker compose --project-directory "$project_root" \
   run --rm -T app --config /app/config.yaml process-file "$container_file" \
   --rules R1 --send --max-send-orders "$order_count"
+
+echo "发送R1验收结果通知。"
+/usr/bin/docker compose --project-directory "$project_root" \
+  run --rm -T --entrypoint python app -c 'from runbow007.config import AppConfig; from runbow007.credentials import get_feishu_secret; from runbow007.notifier import FeishuClient, FeishuMessage; c=AppConfig.load("/app/config.yaml"); m=FeishuMessage("R1规则验收结果", [[{"tag":"text","text":"使用Excel：current_month-00ce6faa4408.xls"}],[{"tag":"text","text":"文件时间：2026-08-12 18:34:56，解析订单：3667单"}],[{"tag":"text","text":"规则：离厂时间为空，且当前时间 > WMS过账时间 + 1.5小时"}],[{"tag":"text","text":"本次候选：0单；因此未发送订单预警。"}]]); mid=FeishuClient(c.feishu, app_secret=get_feishu_secret(c.feishu.app_id)).send(m); print("R1验收结果通知已发送，message_id="+mid)'
