@@ -26,4 +26,4 @@ container_file="/app/downloads/$relative_file"
 cd "$project_root"
 exec /usr/bin/docker compose --project-directory "$project_root" \
   run --rm -T app --config /app/config.yaml process-file "$container_file" \
-  --rules R3 --send --max-send-orders "$order_count"
+  --rules R1 --send --max-send-orders "$order_count"
