@@ -27,6 +27,7 @@ printf "验收使用Excel=%s\\n" "$latest_file"
 stat -c "验收Excel时间=%y 大小=%s字节" "$latest_file"
 
 cd "$project_root"
+export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 exec /usr/bin/docker compose --project-directory "$project_root" \
   run --rm -T app --config /app/config.yaml process-file "$container_file" \
   --rules R1 --send --max-send-orders "$order_count"
