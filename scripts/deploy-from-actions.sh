@@ -20,11 +20,6 @@ if [[ "$feishu_test_orders" != "0" && "$feishu_test_orders" != "3" && "$feishu_t
   echo "飞书测试订单数只能是 0、3 或 5。" >&2
   exit 2
 fi
-if [[ "$feishu_test_orders" != "0" && "$run_smoke_test" != "true" ]]; then
-  echo "真实飞书小批量测试前必须先完成本轮下载演练。" >&2
-  exit 2
-fi
-
 if [[ "$(id -u)" -ne 0 ]]; then
   if ! command -v sudo >/dev/null 2>&1; then
     echo "部署用户不是 root，且服务器没有 sudo。" >&2
