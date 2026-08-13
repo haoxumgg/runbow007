@@ -33,7 +33,7 @@ class FakeSession:
 
 
 def test_message_contains_real_mention_token(make_order):
-    order = make_order()
+    order = make_order(departed_at=None)
     candidate = RuleEngine(RulesConfig()).evaluate(
         [order], now=datetime(2026, 8, 6), rule_codes=["R1"]
     )[0]
@@ -46,13 +46,14 @@ def test_message_contains_real_mention_token(make_order):
 
 def test_message_without_user_id_has_no_mention(make_order):
     candidate = RuleEngine(RulesConfig()).evaluate(
-        [make_order()], now=datetime(2026, 8, 6), rule_codes=["R1"]
+        [make_order(departed_at=None)], now=datetime(2026, 8, 6), rule_codes=["R1"]
     )[0]
     message = MessageFormatter(mention_user_id="", mention_name="许昊").format(
         "R1", [candidate]
     )
 
     assert message.content[0] == [{"tag": "text", "text": "请关注以下订单："}]
+    assert "离厂时间为空" in message.content[1][0]["text"]
 
 
 def test_formats_all_remaining_rule_messages(make_order):

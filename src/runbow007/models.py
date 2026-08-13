@@ -11,7 +11,7 @@ class Order:
     order_no: str
     organization: str
     carrier: str
-    departed_at: datetime
+    departed_at: datetime | None
     wms_posted_at: datetime | None
     expected_arrival_at: datetime
     transport_status: str
