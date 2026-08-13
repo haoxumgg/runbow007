@@ -1,6 +1,9 @@
 name: deploy
 
 on:
+  push:
+    branches:
+      - agent/test-r1-feishu
   workflow_dispatch:
     inputs:
       run_smoke_test:
@@ -34,7 +37,7 @@ jobs:
   deploy:
     name: Deploy to server
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
@@ -163,7 +166,7 @@ jobs:
           scp -P "$DEPLOY_PORT" "${common_options[@]}" \
             scripts/deploy-from-actions.sh "$target:$remote_script"
           ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
-            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}' '${{ inputs.feishu_test_orders }}'"
+            "bash '$remote_script' '$GITHUB_SHA' 'true' 'false' '3'"
 
       - name: Remove temporary credentials
         if: always()
