@@ -102,6 +102,8 @@ def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
 
 
 def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
+    export_clicks = []
+
     class FakePage:
         def set_default_timeout(self, timeout):
             assert timeout == app_config.tms.navigation_timeout_seconds * 1000
@@ -150,7 +152,9 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     monkeypatch.setattr(
         downloader,
         "_locator_or_button",
-        lambda page, selector, pattern: SimpleNamespace(click=lambda: None),
+        lambda page, selector, pattern: SimpleNamespace(
+            click=lambda **kwargs: export_clicks.append(kwargs)
+        ),
     )
     monkeypatch.setattr(downloader, "_confirm_export", lambda page: None)
     monkeypatch.setattr(
@@ -166,6 +170,7 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     assert result.path.suffix == ".xlsx"
     assert result.path.read_bytes() == b"valid workbook bytes"
     assert context.closed is True
+    assert export_clicks == [{"no_wait_after": True}]
 
 
 def test_read_total_and_locator_fallback(app_config):
@@ -204,7 +209,8 @@ def test_confirm_export_accepts_disappeared_success_toast(app_config, monkeypatc
             assert timeout == 500
             return self.visible
 
-        def click(self):
+        def click(self, **kwargs):
+            assert kwargs == {"no_wait_after": True}
             self.clicked = True
 
     class Collection:
