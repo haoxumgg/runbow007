@@ -23,6 +23,9 @@ if [[ "$relative_file" == "$latest_file" || "$relative_file" == ../* ]]; then
 fi
 container_file="/app/downloads/$relative_file"
 
+printf "验收使用Excel=%s\\n" "$latest_file"
+stat -c "验收Excel时间=%y 大小=%s字节" "$latest_file"
+
 cd "$project_root"
 exec /usr/bin/docker compose --project-directory "$project_root" \
   run --rm -T app --config /app/config.yaml process-file "$container_file" \
