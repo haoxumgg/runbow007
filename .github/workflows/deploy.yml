@@ -1,9 +1,6 @@
 name: deploy
 
 on:
-  push:
-    branches:
-      - agent/test-r1-feishu
   workflow_dispatch:
     inputs:
       run_smoke_test:
