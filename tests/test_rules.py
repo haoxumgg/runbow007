@@ -88,16 +88,51 @@ def test_r2_rejects_missing_other_day_or_non_transit_actual_arrival(make_order):
 
 def test_r3_detects_both_scenarios(make_order):
     engine = RuleEngine(RulesConfig())
+    arrival_and_signed = datetime(2026, 8, 5, 18, 30)
     unsigned = make_order(
-        transport_status="已签收", contract_status="签署中", signed_at=datetime(2026, 8, 5)
+        transport_status="已签收",
+        contract_status="签署中",
+        actual_arrival_at=arrival_and_signed,
+        signed_at=arrival_and_signed,
     )
     pending = make_order(
-        order_no="C002", transport_status="运输在途（已离厂）", contract_status="已完成"
+        order_no="C002",
+        transport_status="运输在途",
+        contract_status="已完成",
+        actual_arrival_at=arrival_and_signed,
+        signed_at=arrival_and_signed,
     )
     candidates = engine.evaluate(
         [unsigned, pending], now=datetime(2026, 8, 6), rule_codes=["R3"]
     )
     assert {item.scenario for item in candidates} == {"customer_unsigned", "operation_pending"}
+
+
+def test_r3_requires_present_equal_times_and_exact_statuses(make_order):
+    engine = RuleEngine(RulesConfig())
+    missing_times = make_order(
+        order_no="C001", transport_status="已签收", contract_status="签署中"
+    )
+    unequal_times = make_order(
+        order_no="C002",
+        transport_status="已签收",
+        contract_status="签署中",
+        actual_arrival_at=datetime(2026, 8, 5, 18, 30),
+        signed_at=datetime(2026, 8, 5, 18, 31),
+    )
+    old_transit_status = make_order(
+        order_no="C003",
+        transport_status="运输在途（已离厂）",
+        contract_status="已完成",
+        actual_arrival_at=datetime(2026, 8, 5, 18, 30),
+        signed_at=datetime(2026, 8, 5, 18, 30),
+    )
+
+    assert not engine.evaluate(
+        [missing_times, unequal_times, old_transit_status],
+        now=datetime(2026, 8, 6),
+        rule_codes=["R3"],
+    )
 
 
 def test_r4_treats_whitespace_as_missing(make_order):
