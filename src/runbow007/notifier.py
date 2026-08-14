@@ -116,8 +116,16 @@ class MessageFormatter:
         return lines
 
     def _rule_4(self, candidates: list[ReminderCandidate]) -> list[list[dict[str, Any]]]:
-        lines = [self._text_line(f"共 {len(candidates)} 单延迟但未填写原因：")]
+        lines = [
+            self._text_line(f"综合统计：共 {len(candidates)} 个订单。"),
+            self._text_line("明细："),
+        ]
         lines.extend(self._text_line(f"- {item.order.order_no}") for item in candidates)
+        lines.append(
+            self._text_line(
+                "请督促相关人员及时填写延误原因，确保延误订单有完整的归因记录。"
+            )
+        )
         return lines
 
 

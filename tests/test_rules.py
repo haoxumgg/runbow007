@@ -135,8 +135,16 @@ def test_r3_requires_present_equal_times_and_exact_statuses(make_order):
     )
 
 
-def test_r4_treats_whitespace_as_missing(make_order):
+def test_r4_requires_delayed_yes_and_empty_reason(make_order):
     engine = RuleEngine(RulesConfig())
-    order = make_order(is_delayed=True, delay_reason="   ")
-    candidates = engine.evaluate([order], now=datetime(2026, 8, 6), rule_codes=["R4"])
+    matching = make_order(order_no="C001", is_delayed=True, delay_reason="   ")
+    not_delayed = make_order(order_no="C002", is_delayed=False, delay_reason=None)
+    has_reason = make_order(order_no="C003", is_delayed=True, delay_reason="天气原因")
+    candidates = engine.evaluate(
+        [matching, not_delayed, has_reason],
+        now=datetime(2026, 8, 6),
+        rule_codes=["R4"],
+    )
     assert len(candidates) == 1
+    assert candidates[0].order.order_no == "C001"
+    assert candidates[0].reason == "是否延迟为是且延迟原因为空"

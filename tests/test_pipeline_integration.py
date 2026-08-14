@@ -67,7 +67,9 @@ def test_pipeline_sends_in_batches_and_deduplicates_same_day(
 
     assert first.sent_count == 3
     assert second.sent_count == 0
-    assert [len(message.content) for message in sent_messages] == [4, 3]
+    assert [len(message.content) for message in sent_messages] == [6, 5]
+    assert sent_messages[0].content[1][0]["text"] == "综合统计：共 2 个订单。"
+    assert sent_messages[1].content[1][0]["text"] == "综合统计：共 1 个订单。"
     deliveries = _rows(
         app_config.runtime.database_path,
         "SELECT status, message_id FROM deliveries ORDER BY id",

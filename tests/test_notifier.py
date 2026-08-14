@@ -91,7 +91,10 @@ def test_formats_all_remaining_rule_messages(make_order):
     assert "请运营人员将状态更新为「已签收」，合同状态为「已完成」。" in r3_lines
 
     delayed = ReminderCandidate("c", "R4", "delay_reason_missing", "x", in_transit)
-    assert "R2A" in formatter.format("R4", [delayed]).content[-1][0]["text"]
+    r4_lines = [line[0]["text"] for line in formatter.format("R4", [delayed]).content]
+    assert "综合统计：共 1 个订单。" in r4_lines
+    assert "- R2A" in r4_lines
+    assert "请督促相关人员及时填写延误原因，确保延误订单有完整的归因记录。" in r4_lines
 
     with pytest.raises(ValueError, match="没有可格式化"):
         formatter.format("R1", [])
