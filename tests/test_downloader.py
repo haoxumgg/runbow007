@@ -179,7 +179,7 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     monkeypatch.setattr(downloader, "_read_total", lambda page: 42)
     monkeypatch.setattr(
         downloader,
-        "_locator_or_button",
+        "_visible_locator_or_button",
         lambda page, selector, pattern: SimpleNamespace(
             wait_for=lambda **kwargs: export_clicks.append(("wait_for", kwargs)),
             is_enabled=lambda **kwargs: export_clicks.append(("is_enabled", kwargs))
@@ -297,6 +297,48 @@ def test_read_total_and_locator_fallback(app_config):
     app_config.tms.selectors.total_count = ""
     assert downloader._read_total(FakePage()) is None
     assert downloader._locator_or_button(FakePage(), "", r"下载") == "fallback-button"
+
+
+def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
+    class Candidate:
+        def __init__(self, visible):
+            self.visible = visible
+
+        def is_visible(self, *, timeout):
+            assert timeout == 500
+            return self.visible
+
+    class Matches:
+        def __init__(self, candidates):
+            self.candidates = candidates
+
+        def count(self):
+            return len(self.candidates)
+
+        def nth(self, index):
+            return self.candidates[index]
+
+    hidden = Candidate(False)
+    visible = Candidate(True)
+
+    class FakePage:
+        def locator(self, selector):
+            assert "thorn6-icon-daochu" in selector
+            return Matches([hidden, visible])
+
+        def get_by_role(self, role, *, name):
+            return Matches([])
+
+        def wait_for_timeout(self, milliseconds):
+            raise AssertionError("visible configured match should return immediately")
+
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    result = TmsDownloader(app_config)._visible_locator_or_button(
+        FakePage(), app_config.tms.selectors.download_button, r"下载|批量导出"
+    )
+
+    assert result is visible
 
 
 def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):

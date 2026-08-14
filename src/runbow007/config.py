@@ -38,7 +38,9 @@ class TmsSelectors:
     date_from_input: str = ".el-dialog:visible .el-date-editor input"
     query_button: str = ".el-dialog:visible button.el-button--primary"
     total_count: str = "button.pagination-total"
-    download_button: str = "button:has(.thorn6-icon-daoru)"
+    download_button: str = (
+        "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
+    )
 
 
 @dataclass(slots=True)

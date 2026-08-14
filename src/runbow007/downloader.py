@@ -114,7 +114,7 @@ class TmsDownloader:
                     state.expected_total,
                 )
 
-                button = self._locator_or_button(
+                button = self._visible_locator_or_button(
                     page, self.config.tms.selectors.download_button, r"下载|批量导出"
                 )
                 self._dom_click(button, "导出")
@@ -334,6 +334,27 @@ class TmsDownloader:
         if selector:
             return page.locator(selector).first
         return page.get_by_role("button", name=re.compile(name_pattern)).last
+
+    @staticmethod
+    def _visible_locator_or_button(
+        page: object, selector: str, name_pattern: str
+    ) -> object:
+        """Return the visible button when the SPA keeps hidden duplicate toolbars."""
+        collections = []
+        if selector:
+            collections.append(page.locator(selector))
+        collections.append(
+            page.get_by_role("button", name=re.compile(name_pattern))
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            for matches in collections:
+                for index in range(matches.count()):
+                    candidate = matches.nth(index)
+                    if candidate.is_visible(timeout=500):
+                        return candidate
+            page.wait_for_timeout(250)
+        raise TmsDownloadError("页面未找到可见的导出按钮")
 
     @staticmethod
     def _dom_click(locator: object, name: str) -> None:
