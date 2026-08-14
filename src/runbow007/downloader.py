@@ -30,19 +30,26 @@ class DownloadResult:
     dataset: str
 
 
+@dataclass(slots=True)
+class _ExportState:
+    not_before: datetime
+    expected_total: int | None = None
+    task_created: bool = False
+
+
 class TmsDownloader:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
     def download(self, dataset: str = "current_month") -> DownloadResult:
         last_error: Exception | None = None
-        export_not_before = self._local_now()
+        state = _ExportState(not_before=self._local_now())
         for attempt, delay in enumerate((0, 60, 180), start=1):
             if delay:
                 logger.warning("第 %s 次下载失败，%s 秒后重试", attempt - 1, delay)
                 time.sleep(delay)
             try:
-                return self._download_once(dataset, export_not_before=export_not_before)
+                return self._download_once(dataset, state=state)
             except (CredentialError, TmsAuthenticationError):
                 raise
             except Exception as exc:  # browser errors are normalized at the boundary
@@ -51,7 +58,7 @@ class TmsDownloader:
         raise TmsDownloadError(f"TMS 下载连续三次失败: {last_error}") from last_error
 
     def _download_once(
-        self, dataset: str, *, export_not_before: datetime | None = None
+        self, dataset: str, *, state: _ExportState | None = None
     ) -> DownloadResult:
         try:
             from playwright.sync_api import Page, sync_playwright
@@ -59,6 +66,7 @@ class TmsDownloader:
             raise TmsDownloadError("请先安装 Playwright") from exc
 
         self.config.ensure_directories()
+        state = state or _ExportState(not_before=self._local_now())
         password = get_tms_password(self.config.tms.username)
         run_dir = self.config.runtime.downloads_dir / self._local_now().strftime("%Y%m%d")
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -75,25 +83,44 @@ class TmsDownloader:
             page.goto(self.config.tms.url, wait_until="domcontentloaded")
             logger.info("TMS 首页已加载，检查登录状态")
             self._login_if_needed(page, password)
-            logger.info("TMS 登录状态确认完成，打开集团订单管理")
-            self._open_order_page(page)
-            logger.info("集团订单管理已打开，应用数据筛选")
-            self._apply_filters(page, dataset)
-            ui_total = self._read_total(page)
-            logger.info("TMS 筛选完成，页面订单总数=%s", ui_total)
+            if not state.task_created:
+                logger.info("TMS 登录状态确认完成，打开集团订单管理")
+                self._open_order_page(page)
+                logger.info("集团订单管理已打开，应用数据筛选")
+                self._apply_filters(page, dataset)
+                ui_total = self._read_total(page)
+                if ui_total is not None and ui_total > 0:
+                    if state.expected_total is None:
+                        state.expected_total = ui_total
+                    elif state.expected_total != ui_total:
+                        logger.warning(
+                            "TMS 页面订单总数由 %s 变为 %s，继续使用首次有效总数",
+                            state.expected_total,
+                            ui_total,
+                        )
+                logger.info(
+                    "TMS 筛选完成，页面订单总数=%s，本轮匹配总数=%s",
+                    ui_total,
+                    state.expected_total,
+                )
 
-            button = self._locator_or_button(
-                page, self.config.tms.selectors.download_button, r"下载|批量导出"
+                button = self._locator_or_button(
+                    page, self.config.tms.selectors.download_button, r"下载|批量导出"
+                )
+                self._dom_click(button, "导出")
+                logger.info("已点击导出，等待确认窗口")
+                self._confirm_export(page)
+                state.task_created = True
+                logger.info("导出任务已创建，进入下载中心核验")
+            else:
+                logger.info(
+                    "前次已创建导出任务，直接在下载中心复用；匹配总数=%s",
+                    state.expected_total,
+                )
+
+            download = self._download_from_center(
+                page, state.not_before, state.expected_total
             )
-            export_started = export_not_before or self._local_now()
-            # TMS 是 SPA，导出点击会被 Playwright 识别成一次导航，但页面的
-            # 后台请求不会及时结束。按钮已经生效时继续等待导航反而会误报
-            # 超时；后续仍由确认窗口和下载中心任务做业务结果校验。
-            button.click(no_wait_after=True)
-            logger.info("已点击导出，等待确认窗口")
-            self._confirm_export(page)
-            logger.info("导出任务已创建，进入下载中心核验")
-            download = self._download_from_center(page, export_started, ui_total)
             suggested = Path(download.suggested_filename)
             suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
             target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
@@ -103,7 +130,7 @@ class TmsDownloader:
 
         if not target.exists() or target.stat().st_size == 0:
             raise TmsDownloadError("浏览器报告下载完成，但文件为空")
-        return DownloadResult(target, ui_total, dataset)
+        return DownloadResult(target, state.expected_total, dataset)
 
     def _login_if_needed(self, page: object, password: str) -> None:
         selectors = self.config.tms.selectors
@@ -195,9 +222,7 @@ class TmsDownloader:
             for index in range(confirms.count()):
                 confirm = confirms.nth(index)
                 if confirm.is_visible(timeout=500):
-                    # 确认按钮会创建后台导出任务，不需要等待 SPA 导航完成。
-                    # 导出是否真正创建仍由成功提示及下载中心任务共同核验。
-                    confirm.click(no_wait_after=True)
+                    self._dom_click(confirm, "确定")
                     clicked = True
                     break
             if clicked:
@@ -252,11 +277,11 @@ class TmsDownloader:
                         last_snapshot = snapshot
                 if started_at is None or started_at < earliest:
                     continue
+                if expected_total is not None and record_count != expected_total:
+                    continue
                 if "失败" in text:
                     raise TmsDownloadError(f"TMS 下载中心任务失败: {text[:200]}")
                 if "成功" not in text:
-                    continue
-                if expected_total is not None and record_count != expected_total:
                     continue
                 link = row.locator("a:has(img[src*='excel'])").first
                 if not link.count() or not link.is_visible():
@@ -289,6 +314,16 @@ class TmsDownloader:
         if selector:
             return page.locator(selector).first
         return page.get_by_role("button", name=re.compile(name_pattern)).last
+
+    @staticmethod
+    def _dom_click(locator: object, name: str) -> None:
+        locator.wait_for(state="visible")
+        if not locator.is_enabled(timeout=5_000):
+            raise TmsDownloadError(f"页面按钮不可用: {name}")
+        # 李宁 TMS 是 SPA，Playwright 的鼠标点击偶发卡在 actionability 或
+        # 导航等待。元素已确认可见且可用后触发 DOM click，再由后续业务状态
+        # 判断点击是否真正生效。
+        locator.evaluate("element => element.click()")
 
     @staticmethod
     def _click_visible_text(page: object, text: str, *, force: bool = False) -> None:
