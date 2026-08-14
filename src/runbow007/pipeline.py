@@ -36,6 +36,7 @@ class Pipeline:
         expected_ui_total: int | None = None,
         send: bool | None = None,
         max_send_orders: int | None = None,
+        force_send: bool = False,
     ) -> RunResult:
         now = datetime.now(ZoneInfo(self.config.runtime.timezone))
         requested = tuple(code.upper() for code in (rule_codes or self.config.rules.enabled))
@@ -46,6 +47,8 @@ class Pipeline:
         if not selected:
             raise ValueError("请求的规则均未启用")
         should_send = (not self.config.runtime.dry_run) if send is None else send
+        if force_send and not should_send:
+            raise ValueError("强制发送只能与真实发送同时启用")
         if max_send_orders is not None:
             if not should_send:
                 raise ValueError("小批量发送限制必须与真实发送同时启用")
@@ -60,6 +63,7 @@ class Pipeline:
             parsed = read_orders(archived, expected_ui_total=expected_ui_total)
             self.store.upsert_orders(parsed.orders, source_file=archived, seen_at=now)
             candidates = self.rules.evaluate(parsed.orders, now=now, rule_codes=selected)
+            self._log_candidate_counts(candidates, selected)
             self.store.sync_candidates(
                 candidates,
                 selected_rules=selected,
@@ -67,20 +71,26 @@ class Pipeline:
                 seen_at=now,
             )
             send_scope = _limit_unique_orders(candidates, max_send_orders)
-            sendable = [
-                item
-                for item in send_scope
-                if self.store.should_send(
-                    item,
-                    now=now,
-                    repeat_hour=self.config.rules.unresolved_repeat_hour,
-                )
-            ]
+            if force_send:
+                logger.warning("人工验收强制发送已启用，本轮忽略历史发送去重记录")
+                sendable = send_scope
+            else:
+                sendable = [
+                    item
+                    for item in send_scope
+                    if self.store.should_send(
+                        item,
+                        now=now,
+                        repeat_hour=self.config.rules.unresolved_repeat_hour,
+                    )
+                ]
 
             sent_count = 0
             if should_send and sendable:
                 self.config.validate(sending=True)
-                sent_count = self._send_groups(sendable, run_id, now)
+                sent_count = self._send_groups(
+                    sendable, run_id, now, selected_rules=selected
+                )
             else:
                 self._log_preview(sendable)
 
@@ -110,7 +120,12 @@ class Pipeline:
             raise
 
     def _send_groups(
-        self, candidates: list[ReminderCandidate], run_id: str, now: datetime
+        self,
+        candidates: list[ReminderCandidate],
+        run_id: str,
+        now: datetime,
+        *,
+        selected_rules: tuple[str, ...],
     ) -> int:
         app_secret = get_feishu_secret(self.config.feishu.app_id)
         client = FeishuClient(self.config.feishu, app_secret=app_secret)
@@ -118,26 +133,19 @@ class Pipeline:
             mention_user_id=self.config.feishu.mention_user_id,
             mention_name=self.config.feishu.mention_name,
         )
-        groups: dict[str, list[ReminderCandidate]] = defaultdict(list)
-        for candidate in candidates:
-            groups[candidate.rule_code].append(candidate)
-
-        sent_count = 0
-        for rule_code in sorted(groups):
-            group = groups[rule_code]
-            batch_size = self.config.feishu.max_orders_per_message
-            for start in range(0, len(group), batch_size):
-                batch = group[start : start + batch_size]
-                try:
-                    message_id = client.send(formatter.format(rule_code, batch))
-                    self.store.mark_sent(
-                        batch, run_id=run_id, message_id=message_id, sent_at=now
-                    )
-                    sent_count += len(batch)
-                except Exception as exc:
-                    self.store.mark_failed(batch, run_id=run_id, error=str(exc), failed_at=now)
-                    raise
-        return sent_count
+        try:
+            message_id = client.send(
+                formatter.format_combined(selected_rules, candidates)
+            )
+            self.store.mark_sent(
+                candidates, run_id=run_id, message_id=message_id, sent_at=now
+            )
+        except Exception as exc:
+            self.store.mark_failed(
+                candidates, run_id=run_id, error=str(exc), failed_at=now
+            )
+            raise
+        return len(candidates)
 
     def _archive_source(self, source: Path, run_id: str) -> Path:
         source = source.resolve()
@@ -153,6 +161,31 @@ class Pipeline:
             target = target_dir / f"manual-{run_id[:12]}{source.suffix.lower()}"
             shutil.copy2(source, target)
             return target
+
+    @staticmethod
+    def _log_candidate_counts(
+        candidates: list[ReminderCandidate], selected_rules: tuple[str, ...]
+    ) -> None:
+        counts: dict[tuple[str, str], int] = defaultdict(int)
+        for candidate in candidates:
+            counts[(candidate.rule_code, candidate.scenario)] += 1
+        parts: list[str] = []
+        for rule_code in selected_rules:
+            if rule_code == "R3":
+                parts.extend(
+                    (
+                        f"R3场景一={counts[(rule_code, 'customer_unsigned')]}",
+                        f"R3场景二={counts[(rule_code, 'operation_pending')]}",
+                    )
+                )
+            else:
+                rule_count = sum(
+                    value for (code, _), value in counts.items() if code == rule_code
+                )
+                parts.append(
+                    f"{rule_code}={rule_count}"
+                )
+        logger.info("最新规则候选统计: %s", ", ".join(parts))
 
     @staticmethod
     def _log_preview(candidates: list[ReminderCandidate]) -> None:

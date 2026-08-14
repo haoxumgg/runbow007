@@ -37,7 +37,7 @@ def test_pipeline_dry_run_archives_and_persists_real_workbook(
     assert not _rows(app_config.runtime.database_path, "SELECT * FROM deliveries")
 
 
-def test_pipeline_sends_in_batches_and_deduplicates_same_day(
+def test_pipeline_sends_single_message_and_deduplicates_same_day(
     tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
 ):
     source = write_orders_xlsx(
@@ -67,16 +67,56 @@ def test_pipeline_sends_in_batches_and_deduplicates_same_day(
 
     assert first.sent_count == 3
     assert second.sent_count == 0
-    assert [len(message.content) for message in sent_messages] == [6, 5]
-    assert sent_messages[0].content[1][0]["text"] == "综合统计：共 2 个订单。"
-    assert sent_messages[1].content[1][0]["text"] == "综合统计：共 1 个订单。"
+    assert len(sent_messages) == 1
+    assert sent_messages[0].title == "R4订单提醒汇总"
+    assert len(sent_messages[0].content) == 8
+    assert sent_messages[0].content[1][0]["text"] == "【R4｜延迟无原因提醒】"
+    assert sent_messages[0].content[2][0]["text"] == "综合统计：共 3 个订单。"
     deliveries = _rows(
         app_config.runtime.database_path,
         "SELECT status, message_id FROM deliveries ORDER BY id",
     )
     assert len(deliveries) == 3
     assert {row["status"] for row in deliveries} == {"sent"}
-    assert [row["message_id"] for row in deliveries] == ["om_1", "om_1", "om_2"]
+    assert [row["message_id"] for row in deliveries] == ["om_1", "om_1", "om_1"]
+
+
+def test_pipeline_force_send_repeats_current_candidates_for_acceptance(
+    tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
+):
+    source = write_orders_xlsx(
+        tmp_path / "orders.xlsx",
+        [make_order(order_no="FORCE001", is_delayed=True, delay_reason=None)],
+    )
+    sent_messages = []
+
+    class FakeClient:
+        def __init__(self, config, *, app_secret):
+            pass
+
+        def send(self, message):
+            sent_messages.append(message)
+            return f"om_{len(sent_messages)}"
+
+    monkeypatch.setattr("runbow007.pipeline.get_feishu_secret", lambda app_id: "secret")
+    monkeypatch.setattr("runbow007.pipeline.FeishuClient", FakeClient)
+    pipeline = Pipeline(app_config)
+
+    first = pipeline.process_file(source, rule_codes=["R4"], send=True)
+    second = pipeline.process_file(
+        source, rule_codes=["R4"], send=True, force_send=True
+    )
+
+    assert first.sent_count == 1
+    assert second.sent_count == 1
+    assert len(sent_messages) == 2
+
+
+def test_pipeline_rejects_force_send_in_dry_run(app_config):
+    with pytest.raises(ValueError, match="强制发送只能与真实发送同时启用"):
+        Pipeline(app_config).process_file(
+            "missing.xlsx", rule_codes=["R4"], send=False, force_send=True
+        )
 
 
 def test_pipeline_limited_send_is_stable_and_never_moves_to_later_orders(
@@ -166,7 +206,7 @@ def test_pipeline_records_failed_delivery_and_failed_run(
     assert failed_run["status"] == "failed"
     assert "simulated Feishu outage" in failed_run["error"]
     deliveries = _rows(app_config.runtime.database_path, "SELECT * FROM deliveries")
-    assert len(deliveries) == 2
+    assert len(deliveries) == 3
     assert {row["status"] for row in deliveries} == {"failed"}
 
 

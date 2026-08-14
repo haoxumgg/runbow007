@@ -21,12 +21,8 @@ if [[ "$feishu_test_orders" != "0" && "$feishu_test_orders" != "3" && "$feishu_t
   echo "飞书测试订单数只能是 0、3、5 或 all。" >&2
   exit 2
 fi
-if [[ "$feishu_test_rule" != "R1" && "$feishu_test_rule" != "R2" && "$feishu_test_rule" != "R3" && "$feishu_test_rule" != "R4" ]]; then
-  echo "飞书测试规则只能是 R1、R2、R3 或 R4。" >&2
-  exit 2
-fi
-if [[ "$feishu_test_orders" != "0" && "$run_smoke_test" != "true" ]]; then
-  echo "真实飞书小批量测试前必须先完成本轮下载演练。" >&2
+if [[ "$feishu_test_rule" != "R1" && "$feishu_test_rule" != "R2" && "$feishu_test_rule" != "R3" && "$feishu_test_rule" != "R4" && "$feishu_test_rule" != "R1,R2,R3,R4" ]]; then
+  echo "飞书测试规则只能是 R1、R2、R3、R4 或 R1,R2,R3,R4。" >&2
   exit 2
 fi
 
@@ -126,6 +122,9 @@ if [[ "$run_smoke_test" == "true" ]]; then
 fi
 
 if [[ "$feishu_test_orders" != "0" ]]; then
+  if [[ "$run_smoke_test" != "true" ]]; then
+    echo "不触发新的 TMS 导出，复用服务器最新一次成功下载的 Excel。"
+  fi
   echo "执行 ${feishu_test_rule} 真实群消息人工验收，订单范围为 ${feishu_test_orders}。"
   bash ./scripts/send-smoke-alinux3.sh "$feishu_test_rule" "$feishu_test_orders"
 fi
