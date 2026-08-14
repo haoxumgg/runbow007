@@ -109,6 +109,6 @@ class RuleEngine:
             f"R4|{order.order_no}",
             "R4",
             "delay_reason_missing",
-            "订单已延迟但未填写延迟原因",
+            "是否延迟为是且延迟原因为空",
             order,
         )
