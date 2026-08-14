@@ -76,16 +76,16 @@ class MessageFormatter:
         return lines
 
     def _rule_2(self, candidates: list[ReminderCandidate]) -> list[list[dict[str, Any]]]:
-        in_transit = [item for item in candidates if item.order.transport_status != "已签收"]
-        signed = [item for item in candidates if item.order.transport_status == "已签收"]
-        lines = [self._text_line(f"今日预计到达共 {len(candidates)} 单。")]
-        if in_transit:
-            lines.append(self._text_line(f"【运输在途】{len(in_transit)} 单，重点关注："))
-            lines.extend(
-                self._text_line(f"- {item.order.order_no}｜箱数 {item.order.box_count}")
-                for item in in_transit
+        total_boxes = sum(item.order.box_count for item in candidates)
+        lines = [
+            self._text_line(
+                f"总共 {len(candidates)} 个订单，总共 {total_boxes} 箱。"
             )
-        lines.append(self._text_line(f"【已签收】{len(signed)} 单。"))
+        ]
+        lines.extend(
+            self._text_line(f"- {item.order.order_no}｜箱数 {item.order.box_count}")
+            for item in candidates
+        )
         return lines
 
     def _rule_3(self, candidates: list[ReminderCandidate]) -> list[list[dict[str, Any]]]:
