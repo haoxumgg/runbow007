@@ -47,8 +47,10 @@ def test_github_deploy_is_manual_and_safe_by_default():
     assert set(trigger) == {"workflow_dispatch"}
     assert inputs["run_smoke_test"]["default"] == "true"
     assert inputs["enable_timers"]["default"] == "false"
+    assert inputs["feishu_test_rule"]["default"] == "R3"
+    assert inputs["feishu_test_rule"]["options"] == ["R1", "R2", "R3", "R4"]
     assert inputs["feishu_test_orders"]["default"] == "0"
-    assert inputs["feishu_test_orders"]["options"] == ["0", "3", "5"]
+    assert inputs["feishu_test_orders"]["options"] == ["0", "3", "5", "all"]
     assert workflow["permissions"] == {"contents": "read"}
 
 
@@ -69,7 +71,7 @@ def test_github_deploy_pins_host_key_and_never_enables_sending():
     assert "RUNBOW007_ENABLE_SENDING=true" not in remote_script
 
 
-def test_feishu_smoke_send_is_hard_limited_and_requires_dry_run_first():
+def test_feishu_manual_send_requires_dry_run_and_validated_options():
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"
     )
@@ -84,9 +86,12 @@ def test_feishu_smoke_send_is_hard_limited_and_requires_dry_run_first():
     assert '"$run_smoke_test" != "true"' in remote_script
     assert '"$feishu_test_orders" != "3"' in remote_script
     assert '"$feishu_test_orders" != "5"' in remote_script
+    assert '"$feishu_test_orders" != "all"' in remote_script
+    assert '"$feishu_test_rule" != "R1"' in remote_script
     assert "RUNBOW007_RUNTIME_FILE" in send_script
     assert 'source "$runtime_file"' in send_script
-    assert "--rules R3 --send --max-send-orders" in send_script
+    assert '--rules "$rule_code" --send' in send_script
+    assert 'if [[ "$order_count" != "all" ]]' in send_script
 
 
 def test_actions_deploy_can_bootstrap_docker_on_alinux3():

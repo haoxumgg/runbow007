@@ -13,8 +13,18 @@ on:
         required: true
         default: false
         type: boolean
+      feishu_test_rule:
+        description: "人工验收时发送哪一类提醒"
+        required: true
+        default: "R3"
+        type: choice
+        options:
+          - "R1"
+          - "R2"
+          - "R3"
+          - "R4"
       feishu_test_orders:
-        description: "演练成功后真实发送的测试订单数（0 不发送；仅允许 3 或 5）"
+        description: "人工验收发送量（0 不发送；all 为该规则全部待发送订单）"
         required: true
         default: "0"
         type: choice
@@ -22,6 +32,7 @@ on:
           - "0"
           - "3"
           - "5"
+          - "all"
 
 permissions:
   contents: read
@@ -163,7 +174,7 @@ jobs:
           scp -P "$DEPLOY_PORT" "${common_options[@]}" \
             scripts/deploy-from-actions.sh "$target:$remote_script"
           ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
-            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}' '${{ inputs.feishu_test_orders }}'"
+            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}' '${{ inputs.feishu_test_orders }}' '${{ inputs.feishu_test_rule }}'"
 
       - name: Remove temporary credentials
         if: always()
