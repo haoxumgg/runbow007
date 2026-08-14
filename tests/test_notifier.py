@@ -58,17 +58,27 @@ def test_message_without_user_id_has_no_mention(make_order):
 
 def test_formats_all_remaining_rule_messages(make_order):
     formatter = MessageFormatter(mention_user_id="", mention_name="许昊")
-    in_transit = make_order(order_no="R2A", expected_arrival_at=datetime(2026, 8, 6))
-    signed = make_order(
+    in_transit = make_order(
+        order_no="R2A",
+        actual_arrival_at=datetime(2026, 8, 6),
+        box_count=10,
+    )
+    second_in_transit = make_order(
         order_no="R2B",
-        expected_arrival_at=datetime(2026, 8, 6),
-        transport_status="已签收",
+        actual_arrival_at=datetime(2026, 8, 6, 18, 0),
+        box_count=5,
     )
     r2 = RuleEngine(RulesConfig()).evaluate(
-        [in_transit, signed], now=datetime(2026, 8, 6), rule_codes=["R2"]
+        [in_transit, second_in_transit],
+        now=datetime(2026, 8, 6),
+        rule_codes=["R2"],
     )
-    assert "【运输在途】1 单" in formatter.format("R2", r2).content[2][0]["text"]
+    r2_message = formatter.format("R2", r2)
+    assert r2_message.content[1][0]["text"] == "总共 2 个订单，总共 15 箱。"
+    assert r2_message.content[2][0]["text"] == "- R2A｜箱数 10"
+    assert r2_message.content[3][0]["text"] == "- R2B｜箱数 5"
 
+    signed = make_order(order_no="R3A", transport_status="已签收")
     unsigned = ReminderCandidate("a", "R3", "customer_unsigned", "x", signed)
     pending = ReminderCandidate("b", "R3", "operation_pending", "x", in_transit)
     r3_message = formatter.format("R3", [unsigned, pending])

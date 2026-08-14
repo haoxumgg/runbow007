@@ -53,11 +53,37 @@ def test_r1_compares_aware_local_now_with_naive_tms_timestamp(make_order):
     assert len(candidates) == 1
 
 
-def test_r2_uses_tms_expected_arrival(make_order):
+def test_r2_uses_actual_arrival_today_and_requires_in_transit_status(make_order):
     engine = RuleEngine(RulesConfig())
-    order = make_order(expected_arrival_at=datetime(2026, 8, 6, 22, 0), carrier_sla_hours=96)
-    candidates = engine.evaluate([order], now=datetime(2026, 8, 6, 13, 30), rule_codes=["R2"])
+    order = make_order(
+        actual_arrival_at=datetime(2026, 8, 6, 22, 0),
+        expected_arrival_at=datetime(2026, 8, 10, 18, 0),
+        transport_status="运输在途（已离厂）",
+    )
+    candidates = engine.evaluate(
+        [order], now=datetime(2026, 8, 6, 13, 30), rule_codes=["R2"]
+    )
     assert len(candidates) == 1
+    assert candidates[0].reason == "实际到达日期为今天但运输状态仍为在途"
+
+
+def test_r2_rejects_missing_other_day_or_non_transit_actual_arrival(make_order):
+    engine = RuleEngine(RulesConfig())
+    missing = make_order(order_no="C001", actual_arrival_at=None)
+    other_day = make_order(
+        order_no="C002", actual_arrival_at=datetime(2026, 8, 5, 23, 59)
+    )
+    signed = make_order(
+        order_no="C003",
+        actual_arrival_at=datetime(2026, 8, 6, 0, 1),
+        transport_status="已签收",
+    )
+
+    assert not engine.evaluate(
+        [missing, other_day, signed],
+        now=datetime(2026, 8, 6, 13, 30),
+        rule_codes=["R2"],
+    )
 
 
 def test_r3_detects_both_scenarios(make_order):

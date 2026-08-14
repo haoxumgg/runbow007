@@ -58,13 +58,17 @@ class RuleEngine:
 
     @staticmethod
     def _rule_2(order: Order, now: datetime) -> ReminderCandidate | None:
-        if order.expected_arrival_at.date() != now.date():
+        if (
+            order.actual_arrival_at is None
+            or order.actual_arrival_at.date() != now.date()
+            or order.transport_status != "运输在途（已离厂）"
+        ):
             return None
         return ReminderCandidate(
             f"R2|{order.order_no}|{now.date().isoformat()}",
             "R2",
             "arrival_today",
-            "TMS预计到达日期为今天",
+            "实际到达日期为今天但运输状态仍为在途",
             order,
         )
 
