@@ -304,9 +304,7 @@ class TmsDownloader:
                     link.click()
                 return info.value
 
-            refresh = page.locator("#refreshItem").first
-            if refresh.count() and refresh.is_visible():
-                refresh.click(force=True)
+            self._click_first_visible_dom(page.locator("#refreshItem"))
             page.wait_for_timeout(2_000)
             if (
                 not matching_task_seen
@@ -355,6 +353,16 @@ class TmsDownloader:
                         return candidate
             page.wait_for_timeout(250)
         raise TmsDownloadError("页面未找到可见的导出按钮")
+
+    @staticmethod
+    def _click_first_visible_dom(matches: object) -> bool:
+        """Click the visible copy when the SPA renders duplicate toolbar controls."""
+        for index in range(matches.count()):
+            candidate = matches.nth(index)
+            if candidate.is_visible(timeout=500):
+                candidate.evaluate("element => element.click()")
+                return True
+        return False
 
     @staticmethod
     def _dom_click(locator: object, name: str) -> None:

@@ -341,6 +341,33 @@ def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
     assert result is visible
 
 
+def test_download_center_refresh_clicks_visible_duplicate():
+    evaluated = []
+
+    class Candidate:
+        def __init__(self, visible):
+            self.visible = visible
+
+        def is_visible(self, *, timeout):
+            assert timeout == 500
+            return self.visible
+
+        def evaluate(self, expression):
+            evaluated.append(expression)
+
+    candidates = [Candidate(False), Candidate(True)]
+
+    class Matches:
+        def count(self):
+            return len(candidates)
+
+        def nth(self, index):
+            return candidates[index]
+
+    assert TmsDownloader._click_first_visible_dom(Matches()) is True
+    assert evaluated == ["element => element.click()"]
+
+
 def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
     class Link:
         first = None
