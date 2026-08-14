@@ -11,6 +11,7 @@ from runbow007.downloader import (
     TmsAuthenticationError,
     TmsDownloader,
     TmsDownloadError,
+    TmsExportTaskNotFound,
     _ExportState,
 )
 
@@ -75,6 +76,28 @@ def test_download_retries_then_succeeds(app_config, monkeypatch):
     assert sleeps == [60, 180]
     assert attempts[0][0] is attempts[1][0] is attempts[2][0]
     assert attempts[1][1:] == attempts[2][1:] == (4177, True)
+
+
+def test_download_reexports_when_created_task_never_appears(app_config, monkeypatch):
+    downloader = TmsDownloader(app_config)
+    expected = DownloadResult(Path("orders.xls"), 4220, "current_month")
+    attempts = []
+    sleeps = []
+
+    def attempt(dataset, *, state):
+        attempts.append((state.expected_total, state.task_created))
+        if len(attempts) == 1:
+            state.expected_total = 4220
+            state.task_created = True
+            raise TmsExportTaskNotFound("no matching task")
+        return expected
+
+    monkeypatch.setattr(downloader, "_download_once", attempt)
+    monkeypatch.setattr("runbow007.downloader.time.sleep", sleeps.append)
+
+    assert downloader.download() == expected
+    assert attempts == [(None, False), (4220, False)]
+    assert sleeps == [60]
 
 
 @pytest.mark.parametrize("error", [CredentialError("missing"), TmsAuthenticationError("bad")])
@@ -359,6 +382,46 @@ def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
 
     assert result is expected_download
     assert link.clicked is True
+
+
+def test_download_center_stops_early_when_new_export_task_never_appears(
+    app_config, monkeypatch
+):
+    class EmptyRows:
+        def filter(self, *, has_text):
+            return self
+
+        def count(self):
+            return 0
+
+    class Refresh:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 0
+
+        def is_visible(self):
+            return False
+
+    class FakePage:
+        def locator(self, selector):
+            return EmptyRows() if selector == "tr" else Refresh()
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 2_000
+
+    timeline = iter((0, 0, 0, 301))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+    downloader = TmsDownloader(app_config)
+    monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
+
+    with pytest.raises(TmsExportTaskNotFound, match="5 分钟内"):
+        downloader._download_from_center(
+            FakePage(), datetime(2026, 8, 14, 14, 51), 4220
+        )
 
 
 def test_confirm_export_accepts_disappeared_success_toast(app_config, monkeypatch):

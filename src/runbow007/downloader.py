@@ -23,6 +23,10 @@ class TmsAuthenticationError(TmsDownloadError):
     """Raised for credential problems that should not be retried."""
 
 
+class TmsExportTaskNotFound(TmsDownloadError):
+    """Raised when an export click never produces a matching download-center task."""
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadResult:
     path: Path
@@ -53,6 +57,12 @@ class TmsDownloader:
             except (CredentialError, TmsAuthenticationError):
                 raise
             except Exception as exc:  # browser errors are normalized at the boundary
+                if isinstance(exc, TmsExportTaskNotFound):
+                    # The confirmation toast is not reliable. If the download center also
+                    # has no matching task after a bounded wait, the click did not create
+                    # an observable export and the next attempt must click Export again.
+                    state.task_created = False
+                    logger.warning("下载中心未发现本轮任务，下次重试将重新执行导出")
                 last_error = exc
                 logger.exception("TMS 下载第 %s 次失败", attempt)
         raise TmsDownloadError(f"TMS 下载连续三次失败: {last_error}") from last_error
@@ -250,8 +260,10 @@ class TmsDownloader:
         self._click_visible_text(page, "下载中心", force=True)
         page.wait_for_timeout(2_000)
         deadline = time.monotonic() + self.config.tms.download_timeout_seconds
+        task_appearance_deadline = min(deadline, time.monotonic() + 5 * 60)
         earliest = export_started - timedelta(minutes=1)
         last_snapshot: tuple[object, ...] | None = None
+        matching_task_seen = False
 
         while time.monotonic() < deadline:
             # Element UI 会为固定列复制 tbody；只遍历包含任务名的完整任务行。
@@ -279,6 +291,7 @@ class TmsDownloader:
                     continue
                 if expected_total is not None and record_count != expected_total:
                     continue
+                matching_task_seen = True
                 if "失败" in text:
                     raise TmsDownloadError(f"TMS 下载中心任务失败: {text[:200]}")
                 if "成功" not in text:
@@ -295,6 +308,13 @@ class TmsDownloader:
             if refresh.count() and refresh.is_visible():
                 refresh.click(force=True)
             page.wait_for_timeout(2_000)
+            if (
+                not matching_task_seen
+                and time.monotonic() >= task_appearance_deadline
+            ):
+                raise TmsExportTaskNotFound(
+                    "点击导出后 5 分钟内，下载中心未出现本轮匹配任务"
+                )
 
         raise TmsDownloadError("TMS 下载中心任务在超时时间内未完成")
 

@@ -58,6 +58,7 @@ def test_github_deploy_is_manual_and_safe_by_default():
     assert inputs["feishu_test_orders"]["default"] == "0"
     assert inputs["feishu_test_orders"]["options"] == ["0", "3", "5", "all"]
     assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["jobs"]["deploy"]["timeout-minutes"] == "75"
 
 
 def test_github_deploy_pins_host_key_and_never_enables_sending():
