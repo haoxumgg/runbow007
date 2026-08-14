@@ -74,23 +74,29 @@ class RuleEngine:
 
     @staticmethod
     def _rule_3(order: Order) -> ReminderCandidate | None:
+        if (
+            order.actual_arrival_at is None
+            or order.signed_at is None
+            or order.actual_arrival_at != order.signed_at
+        ):
+            return None
         if order.transport_status == "已签收" and order.contract_status == "签署中":
             return ReminderCandidate(
                 f"R3|unsigned|{order.order_no}",
                 "R3",
                 "customer_unsigned",
-                "订单已签收但合同仍在签署中",
+                "实际到达时间与签收时间一致，订单已签收但合同仍在签署中",
                 order,
             )
         if (
-            order.transport_status == "运输在途（已离厂）"
+            order.transport_status == "运输在途"
             and order.contract_status == "已完成"
         ):
             return ReminderCandidate(
                 f"R3|operation_pending|{order.order_no}",
                 "R3",
                 "operation_pending",
-                "合同已完成但运输状态仍为在途",
+                "实际到达时间与签收时间一致，合同已完成但运输状态仍为在途",
                 order,
             )
         return None

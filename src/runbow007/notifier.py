@@ -93,15 +93,26 @@ class MessageFormatter:
         pending = [item for item in candidates if item.scenario == "operation_pending"]
         lines: list[list[dict[str, Any]]] = []
         if unsigned:
-            lines.append(self._text_line(f"【客户未电子签】{len(unsigned)} 单："))
+            total_boxes = sum(item.order.box_count for item in unsigned)
+            lines.append(self._text_line("【客户未电子签】"))
+            lines.append(
+                self._text_line(
+                    f"总共 {len(unsigned)} 个订单，总共 {total_boxes} 箱。"
+                )
+            )
             lines.extend(
                 self._text_line(f"- {item.order.order_no}｜箱数 {item.order.box_count}")
                 for item in unsigned
             )
         if pending:
-            lines.append(self._text_line(f"【运营未操作签收】{len(pending)} 单："))
+            lines.append(self._text_line("【运营未操作签收】"))
+            lines.append(self._text_line(f"提醒内容：共 {len(pending)} 个订单。"))
             lines.extend(self._text_line(f"- {item.order.order_no}") for item in pending)
-            lines.append(self._text_line("请将运输状态更新为“已签收”。"))
+            lines.append(
+                self._text_line(
+                    "请运营人员将状态更新为「已签收」，合同状态为「已完成」。"
+                )
+            )
         return lines
 
     def _rule_4(self, candidates: list[ReminderCandidate]) -> list[list[dict[str, Any]]]:

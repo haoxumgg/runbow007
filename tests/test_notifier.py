@@ -78,12 +78,17 @@ def test_formats_all_remaining_rule_messages(make_order):
     assert r2_message.content[2][0]["text"] == "- R2A｜箱数 10"
     assert r2_message.content[3][0]["text"] == "- R2B｜箱数 5"
 
-    signed = make_order(order_no="R3A", transport_status="已签收")
+    signed = make_order(order_no="R3A", transport_status="已签收", box_count=12)
+    transit = make_order(order_no="R3B", transport_status="运输在途")
     unsigned = ReminderCandidate("a", "R3", "customer_unsigned", "x", signed)
-    pending = ReminderCandidate("b", "R3", "operation_pending", "x", in_transit)
+    pending = ReminderCandidate("b", "R3", "operation_pending", "x", transit)
     r3_message = formatter.format("R3", [unsigned, pending])
-    assert any("客户未电子签" in line[0]["text"] for line in r3_message.content)
-    assert any("运输状态更新" in line[0]["text"] for line in r3_message.content)
+    r3_lines = [line[0]["text"] for line in r3_message.content]
+    assert "总共 1 个订单，总共 12 箱。" in r3_lines
+    assert "- R3A｜箱数 12" in r3_lines
+    assert "提醒内容：共 1 个订单。" in r3_lines
+    assert "- R3B" in r3_lines
+    assert "请运营人员将状态更新为「已签收」，合同状态为「已完成」。" in r3_lines
 
     delayed = ReminderCandidate("c", "R4", "delay_reason_missing", "x", in_transit)
     assert "R2A" in formatter.format("R4", [delayed]).content[-1][0]["text"]
