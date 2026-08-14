@@ -37,17 +37,54 @@ class MessageFormatter:
         if not candidates:
             raise ValueError("没有可格式化的提醒")
         lines: list[list[dict[str, Any]]] = [self._mention_line()]
-        if rule_code == "R1":
-            lines.extend(self._rule_1(candidates))
-        elif rule_code == "R2":
-            lines.extend(self._rule_2(candidates))
-        elif rule_code == "R3":
-            lines.extend(self._rule_3(candidates))
-        elif rule_code == "R4":
-            lines.extend(self._rule_4(candidates))
-        else:
-            raise ValueError(f"未知规则: {rule_code}")
+        lines.extend(self._rule_lines(rule_code, candidates))
         return FeishuMessage(self.TITLES[rule_code], lines)
+
+    def format_combined(
+        self,
+        rule_codes: tuple[str, ...],
+        candidates: list[ReminderCandidate],
+    ) -> FeishuMessage:
+        """Put every selected rule into one Feishu post instead of multiple batches."""
+        if not candidates:
+            raise ValueError("没有可格式化的提醒")
+        unknown = set(rule_codes) - set(self.TITLES)
+        if unknown:
+            raise ValueError(f"未知规则: {', '.join(sorted(unknown))}")
+
+        groups = {code: [] for code in rule_codes}
+        for candidate in candidates:
+            if candidate.rule_code in groups:
+                groups[candidate.rule_code].append(candidate)
+
+        lines: list[list[dict[str, Any]]] = [self._mention_line()]
+        for rule_code in rule_codes:
+            lines.append(self._text_line(f"【{rule_code}｜{self.TITLES[rule_code]}】"))
+            group = groups[rule_code]
+            if group:
+                lines.extend(self._rule_lines(rule_code, group))
+            else:
+                lines.append(self._text_line("无符合条件订单。"))
+
+        title_prefix = (
+            "R1–R4"
+            if rule_codes == ("R1", "R2", "R3", "R4")
+            else "、".join(rule_codes)
+        )
+        return FeishuMessage(f"{title_prefix}订单提醒汇总", lines)
+
+    def _rule_lines(
+        self, rule_code: str, candidates: list[ReminderCandidate]
+    ) -> list[list[dict[str, Any]]]:
+        if rule_code == "R1":
+            return self._rule_1(candidates)
+        if rule_code == "R2":
+            return self._rule_2(candidates)
+        if rule_code == "R3":
+            return self._rule_3(candidates)
+        if rule_code == "R4":
+            return self._rule_4(candidates)
+        raise ValueError(f"未知规则: {rule_code}")
 
     def _mention_line(self) -> list[dict[str, Any]]:
         if self.mention_user_id:

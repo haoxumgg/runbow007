@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--ui-total", type=int, help="TMS 页面显示的总数")
     process.add_argument("--send", action="store_true", help="真实发送飞书")
     process.add_argument(
+        "--force-send",
+        action="store_true",
+        help="人工验收：忽略历史发送去重记录并重新发送当前命中项",
+    )
+    process.add_argument(
         "--max-send-orders",
         type=_limited_send_count,
         help="仅真实发送时生效；固定限制为最多 1–5 个唯一订单",
@@ -78,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                     expected_ui_total=args.ui_total,
                     send=args.send,
                     max_send_orders=args.max_send_orders,
+                    force_send=args.force_send,
                 )
             else:
                 download = TmsDownloader(config).download(args.dataset)

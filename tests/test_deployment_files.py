@@ -48,7 +48,13 @@ def test_github_deploy_is_manual_and_safe_by_default():
     assert inputs["run_smoke_test"]["default"] == "true"
     assert inputs["enable_timers"]["default"] == "false"
     assert inputs["feishu_test_rule"]["default"] == "R3"
-    assert inputs["feishu_test_rule"]["options"] == ["R1", "R2", "R3", "R4"]
+    assert inputs["feishu_test_rule"]["options"] == [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R1,R2,R3,R4",
+    ]
     assert inputs["feishu_test_orders"]["default"] == "0"
     assert inputs["feishu_test_orders"]["options"] == ["0", "3", "5", "all"]
     assert workflow["permissions"] == {"contents": "read"}
@@ -71,7 +77,7 @@ def test_github_deploy_pins_host_key_and_never_enables_sending():
     assert "RUNBOW007_ENABLE_SENDING=true" not in remote_script
 
 
-def test_feishu_manual_send_requires_dry_run_and_validated_options():
+def test_feishu_manual_send_can_reuse_latest_excel_and_validates_options():
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"
     )
@@ -83,14 +89,16 @@ def test_feishu_manual_send_requires_dry_run_and_validated_options():
     )
 
     assert "feishu_test_orders" in workflow
-    assert '"$run_smoke_test" != "true"' in remote_script
+    assert "复用服务器最新一次成功下载的 Excel" in remote_script
     assert '"$feishu_test_orders" != "3"' in remote_script
     assert '"$feishu_test_orders" != "5"' in remote_script
     assert '"$feishu_test_orders" != "all"' in remote_script
     assert '"$feishu_test_rule" != "R1"' in remote_script
+    assert '"$feishu_test_rule" != "R1,R2,R3,R4"' in remote_script
     assert "RUNBOW007_RUNTIME_FILE" in send_script
     assert 'source "$runtime_file"' in send_script
-    assert '--rules "$rule_code" --send' in send_script
+    assert '--rules "$rule_code" --send --force-send' in send_script
+    assert 'echo "使用最新测试文件: $latest_file"' in send_script
     assert 'if [[ "$order_count" != "all" ]]' in send_script
 
 

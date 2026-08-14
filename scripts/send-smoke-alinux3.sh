@@ -3,12 +3,12 @@ set -euo pipefail
 
 rule_code="${1:-}"
 order_count="${2:-}"
-if [[ "$rule_code" != "R1" && "$rule_code" != "R2" && "$rule_code" != "R3" && "$rule_code" != "R4" ]]; then
-  echo "用法: $0 R1|R2|R3|R4 3|5|all" >&2
+if [[ "$rule_code" != "R1" && "$rule_code" != "R2" && "$rule_code" != "R3" && "$rule_code" != "R4" && "$rule_code" != "R1,R2,R3,R4" ]]; then
+  echo "用法: $0 R1|R2|R3|R4|R1,R2,R3,R4 3|5|all" >&2
   exit 2
 fi
 if [[ "$order_count" != "3" && "$order_count" != "5" && "$order_count" != "all" ]]; then
-  echo "用法: $0 R1|R2|R3|R4 3|5|all" >&2
+  echo "用法: $0 R1|R2|R3|R4|R1,R2,R3,R4 3|5|all" >&2
   exit 2
 fi
 
@@ -34,9 +34,10 @@ if [[ "$relative_file" == "$latest_file" || "$relative_file" == ../* ]]; then
   exit 1
 fi
 container_file="/app/downloads/$relative_file"
+echo "使用最新测试文件: $latest_file"
 command_args=(
   --config /app/config.yaml process-file "$container_file"
-  --rules "$rule_code" --send
+  --rules "$rule_code" --send --force-send
 )
 if [[ "$order_count" != "all" ]]; then
   command_args+=(--max-send-orders "$order_count")

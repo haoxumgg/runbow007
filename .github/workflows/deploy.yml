@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       feishu_test_rule:
-        description: "人工验收时发送哪一类提醒"
+        description: "人工验收规则；组合项将 R1–R4 放入同一条飞书消息"
         required: true
         default: "R3"
         type: choice
@@ -23,6 +23,7 @@ on:
           - "R2"
           - "R3"
           - "R4"
+          - "R1,R2,R3,R4"
       feishu_test_orders:
         description: "人工验收发送量（0 不发送；all 为该规则全部待发送订单）"
         required: true

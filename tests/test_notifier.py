@@ -102,6 +102,33 @@ def test_formats_all_remaining_rule_messages(make_order):
         formatter.format("RX", [delayed])
 
 
+def test_formats_all_rules_in_one_message_with_empty_sections(make_order):
+    formatter = MessageFormatter(mention_user_id="", mention_name="许昊")
+    r2_order = make_order(order_no="COMBINED-R2", box_count=8)
+    r4_order = make_order(order_no="COMBINED-R4")
+    candidates = [
+        ReminderCandidate("r2", "R2", "arrived_today", "x", r2_order),
+        ReminderCandidate("r4", "R4", "delay_reason_missing", "x", r4_order),
+    ]
+
+    message = formatter.format_combined(("R1", "R2", "R3", "R4"), candidates)
+    lines = [line[0]["text"] for line in message.content]
+
+    assert message.title == "R1–R4订单提醒汇总"
+    assert lines.count("无符合条件订单。") == 2
+    assert "【R1｜WMS过账时效预警】" in lines
+    assert "【R2｜今日签收提醒】" in lines
+    assert "【R3｜合同签署状态异常提醒】" in lines
+    assert "【R4｜延迟无原因提醒】" in lines
+    assert "总共 1 个订单，总共 8 箱。" in lines
+    assert "综合统计：共 1 个订单。" in lines
+
+    with pytest.raises(ValueError, match="没有可格式化"):
+        formatter.format_combined(("R1",), [])
+    with pytest.raises(ValueError, match="未知规则: RX"):
+        formatter.format_combined(("RX",), candidates)
+
+
 def test_feishu_client_sends_payload_and_reuses_token():
     session = FakeSession(
         [
