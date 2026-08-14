@@ -32,7 +32,7 @@ tms:
     query_button: ".el-dialog:visible button.el-button--primary"
     # 页面总数会与 Excel 唯一订单数强校验。
     total_count: "button.pagination-total"
-    download_button: "button:has(.thorn6-icon-daoru)"
+    download_button: "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
 
 feishu:
   # 自建应用 App ID。Linux 通过 RUNBOW007_FEISHU_APP_SECRET 提供密钥。
