@@ -7,6 +7,13 @@ if [[ "$order_count" != "3" && "$order_count" != "5" ]]; then
   exit 2
 fi
 
+runtime_file="${RUNBOW007_RUNTIME_FILE:-/etc/runbow007/runtime.env}"
+if [[ -r "$runtime_file" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$runtime_file"
+  set +a
+fi
 project_root="${RUNBOW007_ROOT:-/opt/runbow007}"
 latest_file="$(find "$project_root/downloads" -type f \
   \( -name '*.xls' -o -name '*.xlsx' \) -printf '%T@\t%p\n' \

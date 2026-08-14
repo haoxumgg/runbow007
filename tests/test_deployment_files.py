@@ -84,6 +84,8 @@ def test_feishu_smoke_send_is_hard_limited_and_requires_dry_run_first():
     assert '"$run_smoke_test" != "true"' in remote_script
     assert '"$feishu_test_orders" != "3"' in remote_script
     assert '"$feishu_test_orders" != "5"' in remote_script
+    assert "RUNBOW007_RUNTIME_FILE" in send_script
+    assert 'source "$runtime_file"' in send_script
     assert "--rules R3 --send --max-send-orders" in send_script
 
 
