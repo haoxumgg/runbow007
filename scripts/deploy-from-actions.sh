@@ -113,7 +113,11 @@ install -d -m 0750 /etc/runbow007
 install -m 0600 "$secrets_file" /etc/runbow007/secrets.env
 
 cd "$project_root"
-chmod +x scripts/deploy-alinux3.sh scripts/deploy-from-actions.sh scripts/run-alinux3.sh
+chmod +x \
+  scripts/deploy-alinux3.sh \
+  scripts/deploy-from-actions.sh \
+  scripts/run-alinux3.sh \
+  scripts/notify-failure-alinux3.sh
 ./scripts/deploy-alinux3.sh
 
 if [[ "$run_smoke_test" == "true" ]]; then

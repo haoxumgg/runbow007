@@ -44,25 +44,50 @@ class MessageFormatter:
         self,
         rule_codes: tuple[str, ...],
         candidates: list[ReminderCandidate],
+        *,
+        current_candidates: list[ReminderCandidate] | None = None,
     ) -> FeishuMessage:
-        """Put every selected rule into one Feishu post instead of multiple batches."""
+        """Put every selected rule into one post and preserve deduplication semantics."""
         if not candidates:
             raise ValueError("没有可格式化的提醒")
         unknown = set(rule_codes) - set(self.TITLES)
         if unknown:
             raise ValueError(f"未知规则: {', '.join(sorted(unknown))}")
 
-        groups = {code: [] for code in rule_codes}
+        groups: dict[str, list[ReminderCandidate]] = {code: [] for code in rule_codes}
         for candidate in candidates:
             if candidate.rule_code in groups:
                 groups[candidate.rule_code].append(candidate)
+        current_groups: dict[str, list[ReminderCandidate]] = {
+            code: [] for code in rule_codes
+        }
+        for candidate in current_candidates if current_candidates is not None else candidates:
+            if candidate.rule_code in current_groups:
+                current_groups[candidate.rule_code].append(candidate)
 
         lines: list[list[dict[str, Any]]] = [self._mention_line()]
         for rule_code in rule_codes:
             lines.append(self._text_line(f"【{rule_code}｜{self.TITLES[rule_code]}】"))
             group = groups[rule_code]
+            current_group = current_groups[rule_code]
             if group:
+                previously_sent = len(current_group) - len(group)
+                if previously_sent > 0:
+                    lines.append(
+                        self._text_line(
+                            f"当前符合条件共 {len(current_group)} 个订单；"
+                            f"以下为本轮新增或到期重提醒的 {len(group)} 个订单，"
+                            f"另有 {previously_sent} 个此前已提醒。"
+                        )
+                    )
                 lines.extend(self._rule_lines(rule_code, group))
+            elif current_group:
+                lines.append(
+                    self._text_line(
+                        f"当前仍有 {len(current_group)} 个符合条件订单；"
+                        "本轮无新增提醒（此前已提醒）。"
+                    )
+                )
             else:
                 lines.append(self._text_line("无符合条件订单。"))
 

@@ -13,7 +13,7 @@ class Order:
     carrier: str
     departed_at: datetime | None
     wms_posted_at: datetime | None
-    expected_arrival_at: datetime
+    expected_arrival_at: datetime | None
     transport_status: str
     contract_status: str
     box_count: int

@@ -6,6 +6,13 @@ from datetime import datetime
 from .config import RulesConfig
 from .models import Order, ReminderCandidate
 
+IN_TRANSIT_STATUSES = frozenset({"运输在途", "运输在途（已离厂）"})
+
+
+def _is_in_transit(status: str) -> bool:
+    """Map the two TMS labels used for the same in-transit business state."""
+    return status.strip() in IN_TRANSIT_STATUSES
+
 
 class RuleEngine:
     def __init__(self, config: RulesConfig) -> None:
@@ -61,7 +68,7 @@ class RuleEngine:
         if (
             order.actual_arrival_at is None
             or order.actual_arrival_at.date() != now.date()
-            or order.transport_status != "运输在途（已离厂）"
+            or not _is_in_transit(order.transport_status)
         ):
             return None
         return ReminderCandidate(
@@ -89,7 +96,7 @@ class RuleEngine:
                 order,
             )
         if (
-            order.transport_status == "运输在途"
+            _is_in_transit(order.transport_status)
             and order.contract_status == "已完成"
         ):
             return ReminderCandidate(

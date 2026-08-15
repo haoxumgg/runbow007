@@ -81,6 +81,48 @@ def test_pipeline_sends_single_message_and_deduplicates_same_day(
     assert [row["message_id"] for row in deliveries] == ["om_1", "om_1", "om_1"]
 
 
+def test_pipeline_reports_current_and_new_candidates_separately(
+    tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
+):
+    first_source = write_orders_xlsx(
+        tmp_path / "first.xlsx",
+        [make_order(order_no="D001", is_delayed=True, delay_reason=None)],
+    )
+    second_source = write_orders_xlsx(
+        tmp_path / "second.xlsx",
+        [
+            make_order(order_no="D001", is_delayed=True, delay_reason=None),
+            make_order(order_no="D002", is_delayed=True, delay_reason=None),
+        ],
+    )
+    sent_messages = []
+
+    class FakeClient:
+        def __init__(self, config, *, app_secret):
+            pass
+
+        def send(self, message):
+            sent_messages.append(message)
+            return f"om_{len(sent_messages)}"
+
+    monkeypatch.setattr("runbow007.pipeline.get_feishu_secret", lambda app_id: "secret")
+    monkeypatch.setattr("runbow007.pipeline.FeishuClient", FakeClient)
+    pipeline = Pipeline(app_config)
+
+    pipeline.process_file(first_source, rule_codes=["R4"], send=True)
+    result = pipeline.process_file(second_source, rule_codes=["R4"], send=True)
+
+    lines = [line[0]["text"] for line in sent_messages[-1].content]
+    assert result.candidate_count == 2
+    assert result.sent_count == 1
+    assert (
+        "当前符合条件共 2 个订单；以下为本轮新增或到期重提醒的 1 个订单，"
+        "另有 1 个此前已提醒。"
+    ) in lines
+    assert "- D002" in lines
+    assert "- D001" not in lines
+
+
 def test_pipeline_force_send_repeats_current_candidates_for_acceptance(
     tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
 ):
@@ -129,12 +171,14 @@ def test_pipeline_limited_send_is_stable_and_never_moves_to_later_orders(
             for index in range(1, 5)
         ],
     )
+    sent_messages = []
 
     class FakeClient:
         def __init__(self, config, *, app_secret):
             pass
 
         def send(self, message):
+            sent_messages.append(message)
             return "om_limited"
 
     monkeypatch.setattr("runbow007.pipeline.get_feishu_secret", lambda app_id: "secret")
@@ -150,6 +194,9 @@ def test_pipeline_limited_send_is_stable_and_never_moves_to_later_orders(
 
     assert first.sent_count == 3
     assert second.sent_count == 0
+    assert "此前已提醒" not in "\n".join(
+        line[0]["text"] for line in sent_messages[0].content
+    )
     deliveries = _rows(
         app_config.runtime.database_path,
         """
