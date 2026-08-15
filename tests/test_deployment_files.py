@@ -71,6 +71,7 @@ def test_github_deploy_is_manual_and_safe_by_default():
     assert set(trigger) == {"workflow_dispatch"}
     assert inputs["run_smoke_test"]["default"] == "true"
     assert inputs["enable_timers"]["default"] == "false"
+    assert inputs["enable_sending"]["default"] == "false"
     assert inputs["feishu_test_rule"]["default"] == "R3"
     assert inputs["feishu_test_rule"]["options"] == [
         "R1",
@@ -100,6 +101,21 @@ def test_github_deploy_pins_host_key_and_never_enables_sending():
     assert "workflow_dispatch" in workflow
     assert "RUNBOW007_ENABLE_SENDING=true" not in workflow
     assert "RUNBOW007_ENABLE_SENDING=true" not in remote_script
+
+
+def test_github_deploy_requires_explicit_sending_and_keeps_smoke_dry():
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    remote_script = (ROOT / "scripts" / "deploy-from-actions.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "inputs.enable_sending" in workflow
+    assert 'enable_sending="${6:-false}"' in remote_script
+    assert "RUNBOW007_RUNTIME_FILE=/dev/null" in remote_script
+    assert "RUNBOW007_ENABLE_SENDING=$enable_sending" in remote_script
+    assert "定时任务飞书发送开关已设置为" in remote_script
 
 
 def test_feishu_manual_send_can_reuse_latest_excel_and_validates_options():
