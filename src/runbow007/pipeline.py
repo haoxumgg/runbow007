@@ -34,7 +34,7 @@ class Pipeline:
         *,
         rule_codes: Iterable[str] | None = None,
         expected_ui_total: int | None = None,
-        send: bool | None = None,
+        send: bool = False,
         max_send_orders: int | None = None,
         force_send: bool = False,
     ) -> RunResult:
@@ -46,7 +46,7 @@ class Pipeline:
         selected = tuple(code for code in requested if code in self.config.rules.enabled)
         if not selected:
             raise ValueError("请求的规则均未启用")
-        should_send = (not self.config.runtime.dry_run) if send is None else send
+        should_send = send
         if force_send and not should_send:
             raise ValueError("强制发送只能与真实发送同时启用")
         if max_send_orders is not None:
@@ -89,7 +89,11 @@ class Pipeline:
             if should_send and sendable:
                 self.config.validate(sending=True)
                 sent_count = self._send_groups(
-                    sendable, run_id, now, selected_rules=selected
+                    sendable,
+                    run_id,
+                    now,
+                    selected_rules=selected,
+                    current_candidates=send_scope,
                 )
             else:
                 self._log_preview(sendable)
@@ -126,6 +130,7 @@ class Pipeline:
         now: datetime,
         *,
         selected_rules: tuple[str, ...],
+        current_candidates: list[ReminderCandidate],
     ) -> int:
         app_secret = get_feishu_secret(self.config.feishu.app_id)
         client = FeishuClient(self.config.feishu, app_secret=app_secret)
@@ -135,7 +140,11 @@ class Pipeline:
         )
         try:
             message_id = client.send(
-                formatter.format_combined(selected_rules, candidates)
+                formatter.format_combined(
+                    selected_rules,
+                    candidates,
+                    current_candidates=current_candidates,
+                )
             )
             self.store.mark_sent(
                 candidates, run_id=run_id, message_id=message_id, sent_at=now

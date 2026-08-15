@@ -37,7 +37,6 @@ REQUIRED_FIELDS = {
     "order_no",
     "departed_at",
     "wms_posted_at",
-    "expected_arrival_at",
     "transport_status",
     "contract_status",
     "box_count",
@@ -149,17 +148,15 @@ def _to_order(row: Sequence[Any], row_number: int, positions: dict[str, int | No
     if not order_no:
         raise WorkbookValidationError(f"第 {row_number} 行订单号为空")
     departed_at = _datetime(value("departed_at"), "离厂时间", row_number)
-    expected_at = _datetime(
-        value("expected_arrival_at"), "预计到达时间", row_number, required=True
-    )
-    assert expected_at is not None
     return Order(
         order_no=order_no,
         organization=_text(value("organization")),
         carrier=_text(value("carrier")),
         departed_at=departed_at,
         wms_posted_at=_datetime(value("wms_posted_at"), "WMS过账时间", row_number),
-        expected_arrival_at=expected_at,
+        expected_arrival_at=_datetime(
+            value("expected_arrival_at"), "预计到达时间", row_number
+        ),
         transport_status=_text(value("transport_status")),
         contract_status=_text(value("contract_status")),
         box_count=_integer(value("box_count"), "总箱数", row_number),

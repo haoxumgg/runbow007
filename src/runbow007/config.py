@@ -15,7 +15,6 @@ class ConfigError(ValueError):
 @dataclass(slots=True)
 class RuntimeConfig:
     timezone: str = "Asia/Shanghai"
-    dry_run: bool = True
     data_dir: Path = Path("data")
     downloads_dir: Path = Path("downloads")
     logs_dir: Path = Path("logs")
@@ -62,7 +61,6 @@ class FeishuConfig:
     mention_user_id: str = ""
     mention_name: str = "许昊"
     request_timeout_seconds: int = 20
-    max_orders_per_message: int = 40
 
 
 @dataclass(slots=True)
@@ -98,7 +96,6 @@ class AppConfig:
 
         runtime = RuntimeConfig(
             timezone=str(runtime_raw.get("timezone", "Asia/Shanghai")),
-            dry_run=bool(runtime_raw.get("dry_run", True)),
             data_dir=_path(base, runtime_raw.get("data_dir", "data")),
             downloads_dir=_path(base, runtime_raw.get("downloads_dir", "downloads")),
             logs_dir=_path(base, runtime_raw.get("logs_dir", "logs")),
@@ -138,8 +135,6 @@ class AppConfig:
             raise ConfigError("rules.wms_lead_minutes 必须在 1 到 1440 之间")
         if not 0 <= self.rules.unresolved_repeat_hour <= 23:
             raise ConfigError("rules.unresolved_repeat_hour 必须在 0 到 23 之间")
-        if not 1 <= self.feishu.max_orders_per_message <= 100:
-            raise ConfigError("feishu.max_orders_per_message 必须在 1 到 100 之间")
         if not 1 <= self.runtime.retain_days <= 3650:
             raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):

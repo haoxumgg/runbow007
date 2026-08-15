@@ -30,6 +30,30 @@ def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
     assert "Persistent=true" in arrival
 
 
+def test_systemd_jobs_allow_full_download_window_and_alert_on_failure():
+    timer_dir = ROOT / "deploy" / "systemd"
+    deploy_script = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(
+        encoding="utf-8"
+    )
+    failure_script = (ROOT / "scripts" / "notify-failure-alinux3.sh").read_text(
+        encoding="utf-8"
+    )
+
+    for name in ("runbow007-hourly.service", "runbow007-arrival.service"):
+        service = (timer_dir / name).read_text(encoding="utf-8")
+        assert "TimeoutStartSec=75min" in service
+        assert "SuccessExitStatus=3" in service
+        assert "OnFailure=runbow007-failure@%n.service" in service
+
+    failure_unit = (timer_dir / "runbow007-failure@.service").read_text(
+        encoding="utf-8"
+    )
+    assert "notify-failure-alinux3.sh %i" in failure_unit
+    assert "RUNBOW007_ENABLE_SENDING" in failure_script
+    assert "notify-failure" in failure_script
+    assert "runbow007-failure@.service" in deploy_script
+
+
 def test_linux_runtime_defaults_to_dry_run():
     runtime = (ROOT / "deploy" / "runtime.env.example").read_text(encoding="utf-8")
 

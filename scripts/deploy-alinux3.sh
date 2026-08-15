@@ -39,7 +39,10 @@ fi
 
 install -d -m 0750 data downloads logs browser-profile
 chown -R 10001:10001 data downloads logs browser-profile
-chmod +x scripts/run-alinux3.sh scripts/deploy-alinux3.sh
+chmod +x \
+  scripts/run-alinux3.sh \
+  scripts/notify-failure-alinux3.sh \
+  scripts/deploy-alinux3.sh
 
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 docker compose --project-directory "$project_root" build app
@@ -48,6 +51,7 @@ install -m 0644 deploy/systemd/runbow007-hourly.service /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-hourly.timer /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-arrival.service /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-arrival.timer /etc/systemd/system/
+install -m 0644 deploy/systemd/runbow007-failure@.service /etc/systemd/system/
 systemctl daemon-reload
 
 if $enable_timers; then

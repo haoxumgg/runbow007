@@ -1,7 +1,5 @@
 runtime:
   timezone: Asia/Shanghai
-  # 第一轮必须保持 true；核对候选消息后再通过 --send 显式发送。
-  dry_run: true
   data_dir: data
   downloads_dir: downloads
   logs_dir: logs
@@ -42,11 +40,10 @@ feishu:
   mention_user_id: ""
   mention_name: 许昊
   request_timeout_seconds: 20
-  max_orders_per_message: 40
 
 rules:
   enabled: [R1, R2, R3, R4]
-  # 规则：0 <= 离厂时间 - WMS过账时间 < 90分钟。
+  # 离厂时间为空，且北京时间已超过 WMS过账时间 + 90 分钟时提醒。
   wms_lead_minutes: 90
   # R3/R4 未解决异常每天从此小时开始允许再次提醒。
   unresolved_repeat_hour: 9

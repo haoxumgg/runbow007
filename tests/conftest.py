@@ -67,7 +67,6 @@ def app_config(tmp_path):
     return AppConfig(
         source_path=tmp_path / "config.yaml",
         runtime=RuntimeConfig(
-            dry_run=True,
             data_dir=tmp_path / "data",
             downloads_dir=tmp_path / "downloads",
             logs_dir=tmp_path / "logs",
@@ -76,7 +75,7 @@ def app_config(tmp_path):
             lock_path=tmp_path / "data" / "runbow007.lock",
         ),
         tms=TmsConfig(username="test-user"),
-        feishu=FeishuConfig(app_id="test-app", chat_id="test-chat", max_orders_per_message=2),
+        feishu=FeishuConfig(app_id="test-app", chat_id="test-chat"),
         rules=RulesConfig(),
     )
 

@@ -129,6 +129,30 @@ def test_formats_all_rules_in_one_message_with_empty_sections(make_order):
         formatter.format_combined(("RX",), candidates)
 
 
+def test_combined_message_does_not_call_suppressed_candidates_resolved(make_order):
+    formatter = MessageFormatter(mention_user_id="", mention_name="许昊")
+    new_r2 = ReminderCandidate(
+        "new-r2", "R2", "arrival_today", "x", make_order(order_no="NEW-R2")
+    )
+    existing_r4 = ReminderCandidate(
+        "old-r4",
+        "R4",
+        "delay_reason_missing",
+        "x",
+        make_order(order_no="OLD-R4"),
+    )
+
+    message = formatter.format_combined(
+        ("R2", "R4"),
+        [new_r2],
+        current_candidates=[new_r2, existing_r4],
+    )
+    lines = [line[0]["text"] for line in message.content]
+
+    assert "当前仍有 1 个符合条件订单；本轮无新增提醒（此前已提醒）。" in lines
+    assert lines.count("无符合条件订单。") == 0
+
+
 def test_feishu_client_sends_payload_and_reuses_token():
     session = FakeSession(
         [

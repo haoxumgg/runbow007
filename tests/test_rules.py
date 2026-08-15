@@ -97,7 +97,7 @@ def test_r3_detects_both_scenarios(make_order):
     )
     pending = make_order(
         order_no="C002",
-        transport_status="运输在途",
+        transport_status="运输在途（已离厂）",
         contract_status="已完成",
         actual_arrival_at=arrival_and_signed,
         signed_at=arrival_and_signed,
@@ -108,7 +108,7 @@ def test_r3_detects_both_scenarios(make_order):
     assert {item.scenario for item in candidates} == {"customer_unsigned", "operation_pending"}
 
 
-def test_r3_requires_present_equal_times_and_exact_statuses(make_order):
+def test_r3_requires_present_equal_times_and_known_statuses(make_order):
     engine = RuleEngine(RulesConfig())
     missing_times = make_order(
         order_no="C001", transport_status="已签收", contract_status="签署中"
@@ -120,19 +120,48 @@ def test_r3_requires_present_equal_times_and_exact_statuses(make_order):
         actual_arrival_at=datetime(2026, 8, 5, 18, 30),
         signed_at=datetime(2026, 8, 5, 18, 31),
     )
-    old_transit_status = make_order(
+    unknown_transit_status = make_order(
         order_no="C003",
-        transport_status="运输在途（已离厂）",
+        transport_status="运输中",
         contract_status="已完成",
         actual_arrival_at=datetime(2026, 8, 5, 18, 30),
         signed_at=datetime(2026, 8, 5, 18, 30),
     )
 
     assert not engine.evaluate(
-        [missing_times, unequal_times, old_transit_status],
+        [missing_times, unequal_times, unknown_transit_status],
         now=datetime(2026, 8, 6),
         rule_codes=["R3"],
     )
+
+
+def test_r2_and_r3_accept_legacy_in_transit_alias(make_order):
+    engine = RuleEngine(RulesConfig())
+    timestamp = datetime(2026, 8, 6, 18, 30)
+    r2_order = make_order(
+        order_no="R2-LEGACY",
+        transport_status="运输在途",
+        actual_arrival_at=timestamp,
+    )
+    r3_order = make_order(
+        order_no="R3-LEGACY",
+        transport_status="运输在途",
+        contract_status="已完成",
+        actual_arrival_at=timestamp,
+        signed_at=timestamp,
+    )
+
+    candidates = engine.evaluate(
+        [r2_order, r3_order],
+        now=datetime(2026, 8, 6, 20, 0),
+        rule_codes=["R2", "R3"],
+    )
+
+    assert {(item.rule_code, item.order.order_no) for item in candidates} == {
+        ("R2", "R2-LEGACY"),
+        ("R2", "R3-LEGACY"),
+        ("R3", "R3-LEGACY"),
+    }
 
 
 def test_r4_requires_delayed_yes_and_empty_reason(make_order):

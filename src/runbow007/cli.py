@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 import portalocker
 
 from .config import AppConfig
-from .credentials import set_feishu_secret, set_tms_password
+from .credentials import get_feishu_secret, set_feishu_secret, set_tms_password
 from .downloader import TmsDownloader
+from .notifier import FeishuClient, FeishuMessage
 from .pipeline import Pipeline
 from .retention import cleanup_old_downloads
 
@@ -24,6 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("check-config", help="检查配置并初始化本地目录/数据库")
+
+    failure = subparsers.add_parser("notify-failure", help="向飞书发送服务失败告警")
+    failure.add_argument("--unit", required=True, help="失败的 systemd 单元")
+    failure.add_argument("--details", default="", help="不含敏感信息的失败摘要")
 
     process = subparsers.add_parser("process-file", help="处理已下载的 Excel")
     process.add_argument("file", help=".xls/.xlsx 文件")
@@ -73,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             Pipeline(config)
             print(f"配置有效；数据库: {config.runtime.database_path}")
             return 0
+        if args.command == "notify-failure":
+            return _notify_failure(args, config)
 
         with portalocker.Lock(config.runtime.lock_path, timeout=1):
             pipeline = Pipeline(config)
@@ -107,6 +114,21 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(__name__).exception("运行失败")
         print(f"运行失败: {exc}", file=sys.stderr)
         return 2
+
+
+def _notify_failure(args: argparse.Namespace, config: AppConfig) -> int:
+    config.validate(sending=True)
+    app_secret = get_feishu_secret(config.feishu.app_id)
+    client = FeishuClient(config.feishu, app_secret=app_secret)
+    content = [
+        [{"tag": "text", "text": f"服务：{args.unit}"}],
+        [{"tag": "text", "text": "自动任务执行失败，请检查服务器日志。"}],
+    ]
+    if args.details.strip():
+        content.append([{"tag": "text", "text": f"摘要：{args.details.strip()}"}])
+    message_id = client.send(FeishuMessage("runbow007 运行失败", content))
+    print(f"失败告警已发送: message_id={message_id}")
+    return 0
 
 
 def _credentials(args: argparse.Namespace, config: AppConfig) -> int:

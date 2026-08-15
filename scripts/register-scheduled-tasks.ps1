@@ -23,6 +23,6 @@ $ArrivalTrigger = New-ScheduledTaskTrigger -Daily -At "13:30"
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName "Runbow007-Hourly" -Action $HourlyAction -Trigger $HourlyTrigger -Settings $Settings -Description "007 每小时检查 WMS、合同和延迟提醒" -Force | Out-Null
-Register-ScheduledTask -TaskName "Runbow007-Arrival" -Action $ArrivalAction -Trigger $ArrivalTrigger -Settings $Settings -Description "007 每天13:30发送预计到达提醒" -Force | Out-Null
+Register-ScheduledTask -TaskName "Runbow007-Arrival" -Action $ArrivalAction -Trigger $ArrivalTrigger -Settings $Settings -Description "007 每天13:30发送今日实际到达提醒" -Force | Out-Null
 
 Write-Host "定时任务注册完成。EnableSending=$EnableSending"

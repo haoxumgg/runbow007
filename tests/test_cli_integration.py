@@ -19,6 +19,49 @@ def test_check_config_initializes_database(app_config, monkeypatch, capsys):
     assert "配置有效" in capsys.readouterr().out
 
 
+def test_notify_failure_sends_feishu_alert_without_taking_job_lock(
+    app_config, monkeypatch, capsys
+):
+    sent_messages = []
+
+    class FakeClient:
+        def __init__(self, config, *, app_secret):
+            assert config.chat_id == "test-chat"
+            assert app_secret == "secret"
+
+        def send(self, message):
+            sent_messages.append(message)
+            return "om_failure"
+
+    monkeypatch.setattr(cli.AppConfig, "load", lambda path: app_config)
+    monkeypatch.setattr(cli, "get_feishu_secret", lambda app_id: "secret")
+    monkeypatch.setattr(cli, "FeishuClient", FakeClient)
+    monkeypatch.setattr(
+        cli.portalocker,
+        "Lock",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应获取任务锁")),
+    )
+
+    status = cli.main(
+        [
+            "--config",
+            "ignored.yaml",
+            "notify-failure",
+            "--unit",
+            "runbow007-hourly.service",
+            "--details",
+            "Result=timeout",
+        ]
+    )
+
+    assert status == 0
+    assert sent_messages[0].title == "runbow007 运行失败"
+    lines = [line[0]["text"] for line in sent_messages[0].content]
+    assert "服务：runbow007-hourly.service" in lines
+    assert "摘要：Result=timeout" in lines
+    assert "失败告警已发送" in capsys.readouterr().out
+
+
 def test_process_file_command_runs_full_dry_run(
     tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch, capsys
 ):
