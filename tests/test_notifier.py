@@ -123,8 +123,13 @@ def test_formats_all_rules_in_one_message_with_empty_sections(make_order):
     assert "总共 1 个订单，总共 8 箱。" in lines
     assert "综合统计：共 1 个订单。" in lines
 
-    with pytest.raises(ValueError, match="没有可格式化"):
-        formatter.format_combined(("R1",), [])
+    empty_message = formatter.format_combined(("R1",), [])
+    empty_lines = [line[0]["text"] for line in empty_message.content]
+    assert empty_lines == [
+        "请关注以下订单：",
+        "【R1｜WMS过账时效预警】",
+        "无符合条件订单。",
+    ]
     with pytest.raises(ValueError, match="未知规则: RX"):
         formatter.format_combined(("RX",), candidates)
 

@@ -154,6 +154,40 @@ def test_pipeline_force_send_repeats_current_candidates_for_acceptance(
     assert len(sent_messages) == 2
 
 
+def test_pipeline_force_send_delivers_empty_acceptance_summary(
+    tmp_path, app_config, make_order, write_orders_xlsx, monkeypatch
+):
+    source = write_orders_xlsx(
+        tmp_path / "empty-summary.xlsx",
+        [make_order(order_no="NO-R4", is_delayed=False, delay_reason=None)],
+    )
+    sent_messages = []
+
+    class FakeClient:
+        def __init__(self, config, *, app_secret):
+            pass
+
+        def send(self, message):
+            sent_messages.append(message)
+            return "om_empty"
+
+    monkeypatch.setattr("runbow007.pipeline.get_feishu_secret", lambda app_id: "secret")
+    monkeypatch.setattr("runbow007.pipeline.FeishuClient", FakeClient)
+
+    result = Pipeline(app_config).process_file(
+        source,
+        rule_codes=["R4"],
+        send=True,
+        force_send=True,
+    )
+
+    assert result.candidate_count == 0
+    assert result.sent_count == 0
+    assert len(sent_messages) == 1
+    assert sent_messages[0].content[-1][0]["text"] == "无符合条件订单。"
+    assert not _rows(app_config.runtime.database_path, "SELECT * FROM deliveries")
+
+
 def test_pipeline_rejects_force_send_in_dry_run(app_config):
     with pytest.raises(ValueError, match="强制发送只能与真实发送同时启用"):
         Pipeline(app_config).process_file(

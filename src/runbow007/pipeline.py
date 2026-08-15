@@ -86,7 +86,7 @@ class Pipeline:
                 ]
 
             sent_count = 0
-            if should_send and sendable:
+            if should_send and (sendable or force_send):
                 self.config.validate(sending=True)
                 sent_count = self._send_groups(
                     sendable,
@@ -145,6 +145,11 @@ class Pipeline:
                     candidates,
                     current_candidates=current_candidates,
                 )
+            )
+            logger.info(
+                "飞书汇总消息已发送: message_id=%s candidates=%s",
+                message_id,
+                len(candidates),
             )
             self.store.mark_sent(
                 candidates, run_id=run_id, message_id=message_id, sent_at=now
