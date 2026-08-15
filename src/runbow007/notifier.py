@@ -48,8 +48,6 @@ class MessageFormatter:
         current_candidates: list[ReminderCandidate] | None = None,
     ) -> FeishuMessage:
         """Put every selected rule into one post and preserve deduplication semantics."""
-        if not candidates:
-            raise ValueError("没有可格式化的提醒")
         unknown = set(rule_codes) - set(self.TITLES)
         if unknown:
             raise ValueError(f"未知规则: {', '.join(sorted(unknown))}")
