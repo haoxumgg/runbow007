@@ -9,7 +9,12 @@ on:
         default: true
         type: boolean
       enable_timers:
-        description: "演练成功后启用 7×24 systemd 定时器（仍保持不发送）"
+        description: "演练成功后启用 7×24 systemd 定时器"
+        required: true
+        default: false
+        type: boolean
+      enable_sending:
+        description: "验收成功后允许定时任务真实发送飞书（默认关闭）"
         required: true
         default: false
         type: boolean
@@ -175,7 +180,7 @@ jobs:
           scp -P "$DEPLOY_PORT" "${common_options[@]}" \
             scripts/deploy-from-actions.sh "$target:$remote_script"
           ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
-            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}' '${{ inputs.feishu_test_orders }}' '${{ inputs.feishu_test_rule }}'"
+            "bash '$remote_script' '$GITHUB_SHA' '${{ inputs.run_smoke_test }}' '${{ inputs.enable_timers }}' '${{ inputs.feishu_test_orders }}' '${{ inputs.feishu_test_rule }}' '${{ inputs.enable_sending }}'"
 
       - name: Remove temporary credentials
         if: always()

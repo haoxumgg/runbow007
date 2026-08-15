@@ -153,7 +153,7 @@ Repository secrets：
 - `RUNBOW007_TMS_PASSWORD`：李宁 TMS 密码；
 - `RUNBOW007_FEISHU_APP_SECRET`：飞书应用 App Secret。
 
-然后打开 `Actions → deploy → Run workflow`。首次保持 `run_smoke_test=true`、`enable_timers=false`；候选数量验收后再单独启用定时器。无论是否启用定时器，部署流程都不会把 `RUNBOW007_ENABLE_SENDING` 改为 `true`。
+然后打开 `Actions → deploy → Run workflow`。首次保持 `run_smoke_test=true`、`enable_timers=false`、`enable_sending=false`；候选数量验收后，才同时启用定时器和真实发送。部署冒烟下载始终强制不发送飞书，只有显式选择 `enable_sending=true` 才会修改服务器发送开关。
 
 ### 2. 部署代码
 

@@ -6,12 +6,13 @@ run_smoke_test="${2:-true}"
 enable_timers="${3:-false}"
 feishu_test_orders="${4:-0}"
 feishu_test_rule="${5:-R3}"
+enable_sending="${6:-false}"
 
 if [[ ! "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "无效的 Git commit SHA。" >&2
   exit 2
 fi
-for value in "$run_smoke_test" "$enable_timers"; do
+for value in "$run_smoke_test" "$enable_timers" "$enable_sending"; do
   if [[ "$value" != "true" && "$value" != "false" ]]; then
     echo "布尔参数只能是 true 或 false。" >&2
     exit 2
@@ -121,8 +122,10 @@ chmod +x \
 ./scripts/deploy-alinux3.sh
 
 if [[ "$run_smoke_test" == "true" ]]; then
-  echo "执行一次真实下载演练；RUNBOW007_ENABLE_SENDING 保持 false。"
-  ./scripts/run-alinux3.sh hourly
+  echo "执行一次真实下载演练；本步骤强制不发送飞书。"
+  RUNBOW007_RUNTIME_FILE=/dev/null \
+    RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env \
+    ./scripts/run-alinux3.sh hourly
 fi
 
 if [[ "$feishu_test_orders" != "0" ]]; then
@@ -132,6 +135,17 @@ if [[ "$feishu_test_orders" != "0" ]]; then
   echo "执行 ${feishu_test_rule} 真实群消息人工验收，订单范围为 ${feishu_test_orders}。"
   bash ./scripts/send-smoke-alinux3.sh "$feishu_test_rule" "$feishu_test_orders"
 fi
+
+runtime_file=/etc/runbow007/runtime.env
+if grep -q '^RUNBOW007_ENABLE_SENDING=' "$runtime_file"; then
+  sed -i \
+    "s/^RUNBOW007_ENABLE_SENDING=.*/RUNBOW007_ENABLE_SENDING=$enable_sending/" \
+    "$runtime_file"
+else
+  printf 'RUNBOW007_ENABLE_SENDING=%s\n' "$enable_sending" >> "$runtime_file"
+fi
+chmod 0640 "$runtime_file"
+echo "定时任务飞书发送开关已设置为: $enable_sending"
 
 if [[ "$enable_timers" == "true" ]]; then
   systemctl enable --now runbow007-hourly.timer runbow007-arrival.timer
