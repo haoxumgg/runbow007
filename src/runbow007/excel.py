@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Sequence
 from datetime import date, datetime, time
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 from openpyxl import load_workbook
 
 from .models import Order, ParsedWorkbook
+
+logger = logging.getLogger(__name__)
 
 
 class WorkbookValidationError(ValueError):
@@ -45,7 +48,12 @@ REQUIRED_FIELDS = {
 }
 
 
-def read_orders(path: str | Path, *, expected_ui_total: int | None = None) -> ParsedWorkbook:
+def read_orders(
+    path: str | Path,
+    *,
+    expected_ui_total: int | None = None,
+    total_tolerance: int = 0,
+) -> ParsedWorkbook:
     source = Path(path).resolve()
     if not source.exists():
         raise WorkbookValidationError(f"Excel 文件不存在: {source}")
@@ -70,10 +78,22 @@ def read_orders(path: str | Path, *, expected_ui_total: int | None = None) -> Pa
 
     if not orders:
         raise WorkbookValidationError("Excel 没有订单数据")
-    if expected_ui_total is not None and len(orders) != expected_ui_total:
-        raise WorkbookValidationError(
-            f"页面显示 {expected_ui_total} 条，但 Excel 有 {len(orders)} 个唯一订单"
-        )
+    if expected_ui_total is not None:
+        drift = abs(len(orders) - expected_ui_total)
+        if drift > total_tolerance:
+            raise WorkbookValidationError(
+                f"页面显示 {expected_ui_total} 条，但 Excel 有 {len(orders)} 个唯一订单"
+            )
+        if drift:
+            # 读取页面总数和 TMS 生成导出之间订单还在增减，几条的差异属于正常漂移，
+            # 不应该让整轮提醒失败。
+            logger.warning(
+                "页面显示 %s 条，Excel 有 %s 个唯一订单，相差 %s，在容差 %s 内继续处理",
+                expected_ui_total,
+                len(orders),
+                drift,
+                total_tolerance,
+            )
 
     return ParsedWorkbook(source, sheet_name, tuple(headers), tuple(orders))
 

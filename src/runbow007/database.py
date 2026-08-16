@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .models import Order, ReminderCandidate
@@ -119,11 +119,16 @@ class SQLiteStore:
         selected_rules: Iterable[str],
         observed_order_nos: Iterable[str],
         seen_at: datetime,
+        reopen_grace_hours: int = 0,
     ) -> None:
         items = list(candidates)
         selected = {code.upper() for code in selected_rules}
         observed = sorted(set(observed_order_nos))
         timestamp = seen_at.isoformat()
+        # 命中集合每小时都在抖动（同一订单可能这轮消失、下轮又出现）。只有真正消停
+        # 了 reopen_grace_hours 之后再复发，才算新问题、才清空发送记录；否则保留
+        # last_sent_at，让每日重复提醒的规则继续生效，避免抖一次就重复推送一次。
+        reopen_cutoff = (seen_at - timedelta(hours=reopen_grace_hours)).isoformat()
         with self.connect() as connection:
             for candidate in items:
                 connection.execute(
@@ -136,7 +141,10 @@ class SQLiteStore:
                         state = 'open',
                         last_seen_at = excluded.last_seen_at,
                         last_sent_at = CASE
-                            WHEN reminder_events.state = 'resolved' THEN NULL
+                            WHEN reminder_events.state = 'resolved'
+                                 AND reminder_events.resolved_at IS NOT NULL
+                                 AND reminder_events.resolved_at <= ?
+                            THEN NULL
                             ELSE reminder_events.last_sent_at
                         END,
                         resolved_at = NULL
@@ -148,6 +156,7 @@ class SQLiteStore:
                         candidate.scenario,
                         timestamp,
                         timestamp,
+                        reopen_cutoff,
                     ),
                 )
 

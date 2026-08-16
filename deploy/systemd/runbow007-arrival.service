@@ -10,5 +10,5 @@ Type=oneshot
 WorkingDirectory=/opt/runbow007
 EnvironmentFile=/etc/runbow007/runtime.env
 ExecStart=/opt/runbow007/scripts/run-alinux3.sh arrival
-TimeoutStartSec=75min
+TimeoutStartSec=55min
 SuccessExitStatus=3

@@ -48,7 +48,8 @@ class TmsConfig:
     username: str = ""
     headless: bool = True
     navigation_timeout_seconds: int = 45
-    download_timeout_seconds: int = 1200
+    download_timeout_seconds: int = 600
+    total_tolerance: int = 10
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
     selectors: TmsSelectors = field(default_factory=TmsSelectors)
@@ -68,6 +69,7 @@ class RulesConfig:
     enabled: tuple[str, ...] = ("R1", "R2", "R3", "R4")
     wms_lead_minutes: int = 90
     unresolved_repeat_hour: int = 9
+    reopen_grace_hours: int = 12
 
 
 @dataclass(slots=True)
@@ -135,12 +137,16 @@ class AppConfig:
             raise ConfigError("rules.wms_lead_minutes 必须在 1 到 1440 之间")
         if not 0 <= self.rules.unresolved_repeat_hour <= 23:
             raise ConfigError("rules.unresolved_repeat_hour 必须在 0 到 23 之间")
+        if not 0 <= self.rules.reopen_grace_hours <= 24 * 30:
+            raise ConfigError("rules.reopen_grace_hours 必须在 0 到 720 之间")
         if not 1 <= self.runtime.retain_days <= 3650:
             raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):
             raise ConfigError("tms.url 必须使用 HTTPS")
         if not 60 <= self.tms.download_timeout_seconds <= 1800:
             raise ConfigError("tms.download_timeout_seconds 必须在 60 到 1800 之间")
+        if not 0 <= self.tms.total_tolerance <= 1000:
+            raise ConfigError("tms.total_tolerance 必须在 0 到 1000 之间")
         if sending:
             missing = [
                 name
