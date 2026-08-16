@@ -1,0 +1,120 @@
+name: collect-logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "每段日志采集的行数"
+        required: true
+        default: "400"
+        type: choice
+        options:
+          - "200"
+          - "400"
+          - "1000"
+          - "3000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runbow007-collect-logs
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Collect server logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment settings
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          required=(
+            DEPLOY_HOST
+            DEPLOY_USER
+            DEPLOY_SSH_PRIVATE_KEY
+            DEPLOY_KNOWN_HOSTS
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub Actions setting: $name" >&2
+              exit 1
+            fi
+          done
+          [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || {
+            echo "DEPLOY_HOST is not a valid IPv4 address or hostname" >&2
+            exit 1
+          }
+          [[ "$DEPLOY_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || {
+            echo "DEPLOY_USER is not valid" >&2
+            exit 1
+          }
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] \
+            && (( DEPLOY_PORT >= 1 && DEPLOY_PORT <= 65535 )) || {
+              echo "DEPLOY_PORT must be between 1 and 65535" >&2
+              exit 1
+            }
+
+      - name: Prepare pinned SSH connection
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/id_runbow007"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/id_runbow007" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/id_runbow007" >/dev/null
+
+      - name: Collect logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$HOME/.ssh/id_runbow007"
+          known_hosts="$HOME/.ssh/known_hosts"
+          target="${DEPLOY_USER}@${DEPLOY_HOST}"
+          lines='${{ inputs.lines }}'
+          common_options=(
+            -i "$key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$known_hosts"
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=10
+          )
+
+          ssh -p "$DEPLOY_PORT" "${common_options[@]}" "$target" \
+            "bash -s -- '$lines'" < scripts/collect-server-logs.sh \
+            | sed -E 's/(SECRET|PASSWORD|TOKEN|Bearer)[A-Za-z_]*[=: ][^ ]*/\1=***/g' \
+            | tee "$RUNNER_TEMP/runbow007-server-logs.txt"
+
+      - name: Upload collected logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runbow007-server-logs
+          path: ${{ runner.temp }}/runbow007-server-logs.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.ssh/id_runbow007" "$HOME/.ssh/known_hosts"
