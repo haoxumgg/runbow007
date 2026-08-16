@@ -39,19 +39,45 @@ class _ExportState:
     not_before: datetime
     expected_total: int | None = None
     task_created: bool = False
+    budget_deadline: float | None = None
 
 
 class TmsDownloader:
+    # Playwright ignores the timeout passed to Locator.is_visible()/is_hidden() and
+    # falls back to the page default (navigation_timeout_seconds). On a busy TMS page a
+    # single probe then blocks for the full default and blows past the polling deadline
+    # that was supposed to contain it. Locator.wait_for() honours its timeout, so every
+    # visibility probe goes through _visible_now() below.
+    _PROBE_TIMEOUT_MS = 500
+    _RETRY_DELAYS = (0, 60, 180)
+    # The hourly timer fires every 60 minutes and a second run is refused by the file
+    # lock, so a single run must never spend a whole hour retrying: it would silently
+    # eat the next slot. Give up on further attempts once the budget is spent.
+    _RUN_BUDGET_SECONDS = 50 * 60
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
     def download(self, dataset: str = "current_month") -> DownloadResult:
         last_error: Exception | None = None
-        state = _ExportState(not_before=self._local_now())
-        for attempt, delay in enumerate((0, 60, 180), start=1):
+        attempts_made = 0
+        state = _ExportState(
+            not_before=self._local_now(),
+            budget_deadline=time.monotonic() + self._RUN_BUDGET_SECONDS,
+        )
+        for attempt, delay in enumerate(self._RETRY_DELAYS, start=1):
             if delay:
+                remaining = self._budget_remaining(state)
+                if remaining is not None and remaining <= delay:
+                    logger.error(
+                        "本轮下载预算仅剩 %.0f 秒，放弃第 %s 次重试，避免占用下一个整点",
+                        max(remaining, 0.0),
+                        attempt,
+                    )
+                    break
                 logger.warning("第 %s 次下载失败，%s 秒后重试", attempt - 1, delay)
                 time.sleep(delay)
+            attempts_made = attempt
             try:
                 return self._download_once(dataset, state=state)
             except (CredentialError, TmsAuthenticationError):
@@ -65,7 +91,15 @@ class TmsDownloader:
                     logger.warning("下载中心未发现本轮任务，下次重试将重新执行导出")
                 last_error = exc
                 logger.exception("TMS 下载第 %s 次失败", attempt)
-        raise TmsDownloadError(f"TMS 下载连续三次失败: {last_error}") from last_error
+        raise TmsDownloadError(
+            f"TMS 下载连续 {attempts_made} 次失败: {last_error}"
+        ) from last_error
+
+    @staticmethod
+    def _budget_remaining(state: _ExportState) -> float | None:
+        if state.budget_deadline is None:
+            return None
+        return state.budget_deadline - time.monotonic()
 
     def _download_once(
         self, dataset: str, *, state: _ExportState | None = None
@@ -117,6 +151,10 @@ class TmsDownloader:
                 button = self._visible_locator_or_button(
                     page, self.config.tms.selectors.download_button, r"下载|批量导出"
                 )
+                # Anchor the download-center window on the click itself. Anchoring it on
+                # the start of the run left minutes of slack in which somebody else's
+                # export could be mistaken for ours.
+                state.not_before = self._local_now()
                 self._dom_click(button, "导出")
                 logger.info("已点击导出，等待确认窗口")
                 self._confirm_export(page)
@@ -129,7 +167,10 @@ class TmsDownloader:
                 )
 
             download = self._download_from_center(
-                page, state.not_before, state.expected_total
+                page,
+                state.not_before,
+                state.expected_total,
+                budget_seconds=self._budget_remaining(state),
             )
             suggested = Path(download.suggested_filename)
             suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
@@ -149,15 +190,12 @@ class TmsDownloader:
         visible = False
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            try:
-                if username.is_visible():
-                    visible = True
-                    break
-                home = page.get_by_text("下载中心", exact=True)
-                if any(home.nth(index).is_visible() for index in range(home.count())):
-                    return
-            except Exception:
-                pass
+            if self._visible_now(username):
+                visible = True
+                break
+            home = page.get_by_text("下载中心", exact=True)
+            if self._any_visible(home):
+                return
             page.wait_for_timeout(250)
         if not visible:
             return
@@ -171,22 +209,18 @@ class TmsDownloader:
             )
         except Exception:
             pass
-        try:
-            still_visible = username.is_visible(timeout=5_000)
-        except Exception:
-            still_visible = False
-        if still_visible:
+        if self._visible_now(username, timeout_ms=5_000):
             raise TmsAuthenticationError("TMS 登录后仍停留在登录页，请检查账号或密码")
 
     @classmethod
     def _open_order_page(cls, page: object) -> None:
         advanced = page.locator("#searchItem").first
-        if advanced.count() and advanced.is_visible():
+        if advanced.count() and cls._visible_now(advanced):
             return
         cls._click_visible_text(page, "订单管理")
         page.wait_for_timeout(500)
         cls._click_visible_text(page, "集团订单管理")
-        advanced.wait_for(state="visible")
+        advanced.wait_for(state="visible", timeout=30_000)
 
     def _apply_filters(self, page: object, dataset: str) -> None:
         selectors = self.config.tms.selectors
@@ -231,7 +265,7 @@ class TmsDownloader:
         while time.monotonic() < deadline:
             for index in range(confirms.count()):
                 confirm = confirms.nth(index)
-                if confirm.is_visible(timeout=500):
+                if self._visible_now(confirm):
                     self._dom_click(confirm, "确定")
                     clicked = True
                     break
@@ -244,10 +278,7 @@ class TmsDownloader:
         success = page.get_by_text("下载任务添加成功", exact=False)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if any(
-                success.nth(index).is_visible(timeout=500)
-                for index in range(success.count())
-            ):
+            if self._any_visible(success):
                 return
             page.wait_for_timeout(250)
         # 成功提示是短暂 toast，页面响应慢时可能在定位前已消失。下载中心的
@@ -255,11 +286,19 @@ class TmsDownloader:
         logger.info("未捕获到导出成功提示，继续在下载中心核验任务")
 
     def _download_from_center(
-        self, page: object, export_started: datetime, expected_total: int | None
+        self,
+        page: object,
+        export_started: datetime,
+        expected_total: int | None,
+        *,
+        budget_seconds: float | None = None,
     ) -> object:
         self._click_visible_text(page, "下载中心", force=True)
         page.wait_for_timeout(2_000)
-        deadline = time.monotonic() + self.config.tms.download_timeout_seconds
+        wait_seconds = self.config.tms.download_timeout_seconds
+        if budget_seconds is not None:
+            wait_seconds = min(wait_seconds, max(budget_seconds, 60.0))
+        deadline = time.monotonic() + wait_seconds
         task_appearance_deadline = min(deadline, time.monotonic() + 5 * 60)
         earliest = export_started - timedelta(minutes=1)
         last_snapshot: tuple[object, ...] | None = None
@@ -289,7 +328,7 @@ class TmsDownloader:
                         last_snapshot = snapshot
                 if started_at is None or started_at < earliest:
                     continue
-                if expected_total is not None and record_count != expected_total:
+                if not self._total_matches(record_count, expected_total):
                     continue
                 matching_task_seen = True
                 if "失败" in text:
@@ -297,7 +336,7 @@ class TmsDownloader:
                 if "成功" not in text:
                     continue
                 link = row.locator("a:has(img[src*='excel'])").first
-                if not link.count() or not link.is_visible():
+                if not link.count() or not self._visible_now(link):
                     continue
                 remaining = max(1, int(deadline - time.monotonic())) * 1_000
                 with page.expect_download(timeout=remaining) as info:
@@ -327,15 +366,64 @@ class TmsDownloader:
         record_count = numeric[-2] if len(numeric) >= 2 else None
         return started_at, record_count
 
+    def _total_matches(self, record_count: int | None, expected_total: int | None) -> bool:
+        """Accept the export task whose row count is close enough to the page total.
+
+        订单数在"读取页面总数"到"TMS 真正生成导出"之间会继续变化（实测一小时内
+        4672→4677），此前的严格相等比较会让本轮任务永远匹配不上，5 分钟后重新点击
+        导出，最终整轮失败。容差用于吸收这种漂移，同时仍然排除条数量级不同的
+        无关任务。
+        """
+        if expected_total is None or record_count is None:
+            return record_count == expected_total
+        drift = abs(record_count - expected_total)
+        if drift > self.config.tms.total_tolerance:
+            return False
+        if drift:
+            logger.info(
+                "下载中心任务条数 %s 与页面总数 %s 相差 %s，在容差 %s 内，按本轮任务处理",
+                record_count,
+                expected_total,
+                drift,
+                self.config.tms.total_tolerance,
+            )
+        return True
+
+    @classmethod
+    def _visible_now(cls, locator: object, *, timeout_ms: int | None = None) -> bool:
+        """Bounded visibility probe.
+
+        ``Locator.is_visible(timeout=...)`` silently ignores its timeout and uses the
+        page default instead, so probing with it turned every polling loop in this
+        module into a single 45 秒 block that raised a raw ``TimeoutError`` past the
+        deadline it was supposed to respect. ``wait_for`` honours the timeout it is
+        given; a probe that does not resolve in time simply means "not visible yet".
+        """
+        try:
+            locator.wait_for(
+                state="visible", timeout=timeout_ms or cls._PROBE_TIMEOUT_MS
+            )
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def _any_visible(cls, matches: object) -> bool:
+        try:
+            total = matches.count()
+        except Exception:
+            return False
+        return any(cls._visible_now(matches.nth(index)) for index in range(total))
+
     @staticmethod
     def _locator_or_button(page: object, selector: str, name_pattern: str) -> object:
         if selector:
             return page.locator(selector).first
         return page.get_by_role("button", name=re.compile(name_pattern)).last
 
-    @staticmethod
+    @classmethod
     def _visible_locator_or_button(
-        page: object, selector: str, name_pattern: str
+        cls, page: object, selector: str, name_pattern: str
     ) -> object:
         """Return the visible button when the SPA keeps hidden duplicate toolbars."""
         collections = []
@@ -349,24 +437,26 @@ class TmsDownloader:
             for matches in collections:
                 for index in range(matches.count()):
                     candidate = matches.nth(index)
-                    if candidate.is_visible(timeout=500):
+                    if cls._visible_now(candidate):
                         return candidate
             page.wait_for_timeout(250)
         raise TmsDownloadError("页面未找到可见的导出按钮")
 
-    @staticmethod
-    def _click_first_visible_dom(matches: object) -> bool:
+    @classmethod
+    def _click_first_visible_dom(cls, matches: object) -> bool:
         """Click the visible copy when the SPA renders duplicate toolbar controls."""
         for index in range(matches.count()):
             candidate = matches.nth(index)
-            if candidate.is_visible(timeout=500):
+            if cls._visible_now(candidate):
                 candidate.evaluate("element => element.click()")
                 return True
         return False
 
     @staticmethod
     def _dom_click(locator: object, name: str) -> None:
-        locator.wait_for(state="visible")
+        # 调用方已经用 _visible_now 确认过可见性，这里不再 wait_for。Element UI 的
+        # 工具栏会反复重渲染，重复等待时 Playwright 会报"resolved to visible"却仍然
+        # 超时（2026-08-16 21:10 那轮就挂在这里），等于凭空多一个失败点。
         if not locator.is_enabled(timeout=5_000):
             raise TmsDownloadError(f"页面按钮不可用: {name}")
         # 李宁 TMS 是 SPA，Playwright 的鼠标点击偶发卡在 actionability 或
@@ -374,14 +464,14 @@ class TmsDownloader:
         # 判断点击是否真正生效。
         locator.evaluate("element => element.click()")
 
-    @staticmethod
-    def _click_visible_text(page: object, text: str, *, force: bool = False) -> None:
+    @classmethod
+    def _click_visible_text(cls, page: object, text: str, *, force: bool = False) -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             matches = page.get_by_text(text, exact=True)
             for index in range(matches.count()):
                 candidate = matches.nth(index)
-                if candidate.is_visible():
+                if cls._visible_now(candidate):
                     if force:
                         # TMS 的成功提示层可能长期覆盖菜单。这里直接触发已确认
                         # 可见菜单元素的 DOM click，避免覆盖层截获鼠标事件。

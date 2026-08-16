@@ -16,7 +16,7 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert "./data:/app/data" in volumes
     assert "./downloads:/app/downloads" in volumes
     assert "./browser-profile:/app/browser-profile" in volumes
-    assert app["environment"]["RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS"] == "1200"
+    assert app["environment"]["RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS"] == "600"
 
 
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
@@ -41,7 +41,9 @@ def test_systemd_jobs_allow_full_download_window_and_alert_on_failure():
 
     for name in ("runbow007-hourly.service", "runbow007-arrival.service"):
         service = (timer_dir / name).read_text(encoding="utf-8")
-        assert "TimeoutStartSec=75min" in service
+        # 必须小于每小时一次的调度间隔：卡死的一轮要在下一个整点之前被收掉，
+        # 否则下一轮只会撞上文件锁然后静默跳过。
+        assert "TimeoutStartSec=55min" in service
         assert "SuccessExitStatus=3" in service
         assert "OnFailure=runbow007-failure@%n.service" in service
 

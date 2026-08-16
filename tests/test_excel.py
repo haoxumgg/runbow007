@@ -148,6 +148,23 @@ def test_rejects_ui_total_mismatch(tmp_path):
         read_orders(path, expected_ui_total=2)
 
 
+def test_accepts_ui_total_drift_within_tolerance(tmp_path):
+    """读页面总数到 TMS 生成导出之间订单还在增减，几条的漂移不该让整轮失败。"""
+    path = tmp_path / "orders.xlsx"
+    _write_sample(path)
+
+    parsed = read_orders(path, expected_ui_total=2, total_tolerance=1)
+
+    assert len(parsed.orders) == 1
+
+
+def test_rejects_ui_total_drift_beyond_tolerance(tmp_path):
+    path = tmp_path / "orders.xlsx"
+    _write_sample(path)
+    with pytest.raises(WorkbookValidationError, match="页面显示 20 条"):
+        read_orders(path, expected_ui_total=20, total_tolerance=1)
+
+
 def test_rejects_duplicate_order_numbers(tmp_path):
     path = tmp_path / "orders.xlsx"
     _write_sample(path, duplicate=True)

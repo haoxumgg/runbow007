@@ -5,7 +5,7 @@ import logging
 import shutil
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,7 +14,7 @@ from .config import AppConfig
 from .credentials import get_feishu_secret
 from .database import SQLiteStore
 from .excel import read_orders
-from .models import ReminderCandidate, RunResult
+from .models import Order, ReminderCandidate, RunResult
 from .notifier import FeishuClient, MessageFormatter
 from .rules import RuleEngine
 
@@ -60,15 +60,21 @@ class Pipeline:
         self.store.begin_run(run_id, archived, digest, now)
 
         try:
-            parsed = read_orders(archived, expected_ui_total=expected_ui_total)
+            parsed = read_orders(
+                archived,
+                expected_ui_total=expected_ui_total,
+                total_tolerance=self.config.tms.total_tolerance,
+            )
             self.store.upsert_orders(parsed.orders, source_file=archived, seen_at=now)
             candidates = self.rules.evaluate(parsed.orders, now=now, rule_codes=selected)
             self._log_candidate_counts(candidates, selected)
+            _log_rule_preconditions(parsed.orders)
             self.store.sync_candidates(
                 candidates,
                 selected_rules=selected,
                 observed_order_nos=(order.order_no for order in parsed.orders),
                 seen_at=now,
+                reopen_grace_hours=self.config.rules.reopen_grace_hours,
             )
             send_scope = _limit_unique_orders(candidates, max_send_orders)
             if force_send:
@@ -213,6 +219,32 @@ class Pipeline:
             )
         else:
             logger.info("没有新的待发送提醒")
+
+
+def _log_rule_preconditions(orders: Sequence[Order]) -> None:
+    """Log how many rows even reach each rule's precondition.
+
+    R1/R4 每轮都是 0，光看候选统计分不清是"数据本来就没有命中"还是"取数口径把这些
+    单子过滤掉了"。这里把各规则的前置条件单独计数，0 候选时可以直接判断根因。
+    """
+    departure_missing = sum(1 for order in orders if order.departed_at is None)
+    wms_present = sum(1 for order in orders if order.wms_posted_at is not None)
+    delayed = sum(1 for order in orders if order.is_delayed)
+    arrival_equals_signed = sum(
+        1
+        for order in orders
+        if order.actual_arrival_at is not None
+        and order.actual_arrival_at == order.signed_at
+    )
+    logger.info(
+        "规则前置条件统计: 订单总数=%s, 离厂时间为空=%s, 有WMS过账时间=%s, "
+        "是否延迟为是=%s, 实际到达=签收时间=%s",
+        len(orders),
+        departure_missing,
+        wms_present,
+        delayed,
+        arrival_equals_signed,
+    )
 
 
 def _sha256(path: Path) -> str:

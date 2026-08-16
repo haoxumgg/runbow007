@@ -108,6 +108,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except portalocker.AlreadyLocked:
+        # systemd 把退出码 3 当作成功（SuccessExitStatus=3），所以这条必须进日志文件，
+        # 否则"上一轮还没跑完导致整点被吃掉"在监控上完全看不出来。
+        logging.getLogger(__name__).error(
+            "上一轮任务仍在运行，本次整点被跳过；如果频繁出现说明单轮耗时已超过调度间隔"
+        )
         print("已有任务运行，本次跳过", file=sys.stderr)
         return 3
     except Exception as exc:

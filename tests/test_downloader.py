@@ -16,6 +16,24 @@ from runbow007.downloader import (
 )
 
 
+class Probeable:
+    """Fake locator whose visibility is probed through ``wait_for``.
+
+    Playwright ignores ``is_visible(timeout=...)``, so the downloader probes with
+    ``wait_for(state="visible", timeout=...)`` and treats a timeout as "not visible".
+    """
+
+    def __init__(self, visible: bool) -> None:
+        self.visible = visible
+        self.probes: list[int] = []
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        self.probes.append(timeout)
+        if not self.visible:
+            raise TimeoutError("locator not visible")
+
+
 def test_parse_download_center_row():
     text = """
     maintainCompanyOrderPage
@@ -100,6 +118,84 @@ def test_download_reexports_when_created_task_never_appears(app_config, monkeypa
     assert sleeps == [60]
 
 
+def test_download_gives_up_when_run_budget_is_spent(app_config, monkeypatch):
+    """单轮不能把整个小时耗光，否则下一个整点会被文件锁静默吃掉。"""
+    downloader = TmsDownloader(app_config)
+    attempts = []
+    sleeps = []
+
+    def attempt(dataset, *, state):
+        attempts.append(state.task_created)
+        raise RuntimeError("temporary")
+
+    # 第 1 次失败后预算只剩 10 秒，不足以再等 60 秒退避。
+    timeline = iter((0, TmsDownloader._RUN_BUDGET_SECONDS - 10))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+    monkeypatch.setattr("runbow007.downloader.time.sleep", sleeps.append)
+    monkeypatch.setattr(downloader, "_download_once", attempt)
+
+    with pytest.raises(TmsDownloadError, match="连续 1 次失败: temporary"):
+        downloader.download()
+
+    assert len(attempts) == 1
+    assert sleeps == []
+
+
+def test_download_center_window_is_clamped_to_remaining_budget(app_config, monkeypatch):
+    class EmptyRows:
+        def filter(self, *, has_text):
+            return self
+
+        def count(self):
+            return 0
+
+    class Refresh:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 0
+
+    class FakePage:
+        def locator(self, selector):
+            return EmptyRows() if selector == "tr" else Refresh()
+
+        def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 2_000
+
+    # 预算只剩 60 秒时，等待窗口从默认的 5 分钟收缩到 60 秒。
+    timeline = iter((0, 0, 0, 61))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+    downloader = TmsDownloader(app_config)
+    monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
+
+    with pytest.raises(TmsExportTaskNotFound):
+        downloader._download_from_center(
+            FakePage(), datetime(2026, 8, 14, 14, 51), 4220, budget_seconds=60
+        )
+
+
+@pytest.mark.parametrize(
+    ("record_count", "expected"),
+    [(4672, True), (4677, True), (4662, True), (4683, False), (12563, False)],
+)
+def test_export_task_total_allows_bounded_drift(app_config, record_count, expected):
+    """订单数一小时内会自然增减，严格相等会让本轮任务永远匹配不上。"""
+    app_config.tms.total_tolerance = 10
+
+    assert TmsDownloader(app_config)._total_matches(record_count, 4672) is expected
+
+
+def test_export_task_total_still_requires_a_count(app_config):
+    downloader = TmsDownloader(app_config)
+
+    assert downloader._total_matches(None, 4672) is False
+    assert downloader._total_matches(None, None) is True
+    assert downloader._total_matches(4672, None) is False
+
+
 @pytest.mark.parametrize("error", [CredentialError("missing"), TmsAuthenticationError("bad")])
 def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, error):
     downloader = TmsDownloader(app_config)
@@ -125,7 +221,7 @@ def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
     )
     monkeypatch.setattr("runbow007.downloader.time.sleep", lambda seconds: None)
 
-    with pytest.raises(TmsDownloadError, match="连续三次失败: browser"):
+    with pytest.raises(TmsDownloadError, match="连续 3 次失败: browser"):
         downloader.download("open_carryover")
 
 
@@ -191,7 +287,7 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     monkeypatch.setattr(
         downloader,
         "_download_from_center",
-        lambda page, export_started, ui_total: FakeDownload(),
+        lambda page, export_started, ui_total, *, budget_seconds=None: FakeDownload(),
     )
 
     state = _ExportState(not_before=datetime(2026, 8, 14, 10, 8))
@@ -204,8 +300,10 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     assert context.closed is True
     assert state.expected_total == 42
     assert state.task_created is True
+    # 点击导出前重新锚定下载中心的时间窗，避免把点击之前的任务当成本轮产物。
+    assert state.not_before > datetime(2026, 8, 14, 10, 8)
+    # 调用方已确认可见性，_dom_click 不再重复 wait_for。
     assert export_clicks == [
-        ("wait_for", {"state": "visible"}),
         ("is_enabled", {"timeout": 5_000}),
         ("evaluate", "element => element.click()"),
     ]
@@ -255,7 +353,7 @@ def test_download_once_reuses_created_export_task(app_config, monkeypatch):
 
     center_calls = []
 
-    def download_from_center(page, export_started, expected_total):
+    def download_from_center(page, export_started, expected_total, *, budget_seconds=None):
         center_calls.append((page, export_started, expected_total))
         return FakeDownload()
 
@@ -300,14 +398,6 @@ def test_read_total_and_locator_fallback(app_config):
 
 
 def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
-    class Candidate:
-        def __init__(self, visible):
-            self.visible = visible
-
-        def is_visible(self, *, timeout):
-            assert timeout == 500
-            return self.visible
-
     class Matches:
         def __init__(self, candidates):
             self.candidates = candidates
@@ -318,8 +408,8 @@ def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
         def nth(self, index):
             return self.candidates[index]
 
-    hidden = Candidate(False)
-    visible = Candidate(True)
+    hidden = Probeable(False)
+    visible = Probeable(True)
 
     class FakePage:
         def locator(self, selector):
@@ -339,19 +429,14 @@ def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
     )
 
     assert result is visible
+    # 探测必须是有界的：is_visible 会忽略 timeout 并退回 45 秒的页面默认值。
+    assert hidden.probes == [TmsDownloader._PROBE_TIMEOUT_MS]
 
 
 def test_download_center_refresh_clicks_visible_duplicate():
     evaluated = []
 
-    class Candidate:
-        def __init__(self, visible):
-            self.visible = visible
-
-        def is_visible(self, *, timeout):
-            assert timeout == 500
-            return self.visible
-
+    class Candidate(Probeable):
         def evaluate(self, expression):
             evaluated.append(expression)
 
@@ -369,18 +454,16 @@ def test_download_center_refresh_clicks_visible_duplicate():
 
 
 def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
-    class Link:
+    class Link(Probeable):
         first = None
 
         def __init__(self):
+            super().__init__(True)
             self.first = self
             self.clicked = False
 
         def count(self):
             return 1
-
-        def is_visible(self):
-            return True
 
         def click(self):
             self.clicked = True
@@ -494,20 +577,13 @@ def test_download_center_stops_early_when_new_export_task_never_appears(
 
 
 def test_confirm_export_accepts_disappeared_success_toast(app_config, monkeypatch):
-    class Item:
+    class Item(Probeable):
         def __init__(self, *, visible=False):
-            self.visible = visible
+            super().__init__(visible)
             self.clicked = False
-
-        def is_visible(self, *, timeout):
-            assert timeout == 500
-            return self.visible
 
         def click(self, **kwargs):
             raise AssertionError("confirmation must use DOM click")
-
-        def wait_for(self, **kwargs):
-            assert kwargs == {"state": "visible"}
 
         def is_enabled(self, **kwargs):
             assert kwargs == {"timeout": 5_000}
@@ -570,7 +646,7 @@ def test_confirm_export_still_requires_confirmation_dialog(app_config, monkeypat
 def test_dom_click_rejects_disabled_button():
     class Disabled:
         def wait_for(self, **kwargs):
-            assert kwargs == {"state": "visible"}
+            raise AssertionError("已确认可见的元素不应再次 wait_for")
 
         def is_enabled(self, **kwargs):
             assert kwargs == {"timeout": 5_000}
@@ -586,9 +662,9 @@ def test_dom_click_rejects_disabled_button():
 def test_force_click_uses_dom_click_when_toast_covers_menu(app_config):
     evaluated = []
 
-    class Candidate:
-        def is_visible(self):
-            return True
+    class Candidate(Probeable):
+        def __init__(self):
+            super().__init__(True)
 
         def evaluate(self, expression):
             evaluated.append(expression)
