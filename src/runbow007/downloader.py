@@ -48,7 +48,13 @@ class TmsDownloader:
     # single probe then blocks for the full default and blows past the polling deadline
     # that was supposed to contain it. Locator.wait_for() honours its timeout, so every
     # visibility probe goes through _visible_now() below.
-    _PROBE_TIMEOUT_MS = 500
+    #
+    # 两个值要一起看：单次探测必须远小于循环时限，循环时限才有意义；而循环时限又必须
+    # 高于旧代码单次探测实际等待的 45 秒，否则 SPA 慢的时候反而比修复前更早放弃。
+    # 8/16 23:40 的演练就是踩了这个：500ms 探测 + 30 秒时限，导出按钮和"下载中心"
+    # 菜单都没等到。
+    _PROBE_TIMEOUT_MS = 1_000
+    _ELEMENT_WAIT_SECONDS = 60
     _RETRY_DELAYS = (0, 60, 180)
     # The hourly timer fires every 60 minutes and a second run is refused by the file
     # lock, so a single run must never spend a whole hour retrying: it would silently
@@ -260,7 +266,7 @@ class TmsDownloader:
 
     def _confirm_export(self, page: object) -> None:
         confirms = page.get_by_role("button", name="确定")
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
         clicked = False
         while time.monotonic() < deadline:
             for index in range(confirms.count()):
@@ -374,8 +380,12 @@ class TmsDownloader:
         导出，最终整轮失败。容差用于吸收这种漂移，同时仍然排除条数量级不同的
         无关任务。
         """
-        if expected_total is None or record_count is None:
-            return record_count == expected_total
+        if expected_total is None:
+            # 页面总数没读出来（TMS 慢时 _read_total 会返回 0）就不做条数过滤，
+            # 只靠时间窗判断归属。这里一旦改成拒绝，本轮任务永远匹配不上。
+            return True
+        if record_count is None:
+            return False
         drift = abs(record_count - expected_total)
         if drift > self.config.tms.total_tolerance:
             return False
@@ -432,7 +442,7 @@ class TmsDownloader:
         collections.append(
             page.get_by_role("button", name=re.compile(name_pattern))
         )
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
         while time.monotonic() < deadline:
             for matches in collections:
                 for index in range(matches.count()):
@@ -466,7 +476,7 @@ class TmsDownloader:
 
     @classmethod
     def _click_visible_text(cls, page: object, text: str, *, force: bool = False) -> None:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
         while time.monotonic() < deadline:
             matches = page.get_by_text(text, exact=True)
             for index in range(matches.count()):

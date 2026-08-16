@@ -191,9 +191,21 @@ def test_export_task_total_allows_bounded_drift(app_config, record_count, expect
 def test_export_task_total_still_requires_a_count(app_config):
     downloader = TmsDownloader(app_config)
 
+    # 页面总数已知但任务还没出条数（处理中）：不能当成本轮任务。
     assert downloader._total_matches(None, 4672) is False
     assert downloader._total_matches(None, None) is True
-    assert downloader._total_matches(4672, None) is False
+
+
+def test_export_task_total_skips_filtering_when_page_total_unknown(app_config):
+    """TMS 慢时 _read_total 会返回 0，expected_total 保持 None。
+
+    这种情况下必须放行、只靠时间窗判断归属；一旦改成拒绝，本轮任务永远匹配不上，
+    5 分钟后重新点导出，最终整轮失败。
+    """
+    downloader = TmsDownloader(app_config)
+
+    assert downloader._total_matches(4672, None) is True
+    assert downloader._total_matches(0, None) is True
 
 
 @pytest.mark.parametrize("error", [CredentialError("missing"), TmsAuthenticationError("bad")])
@@ -636,7 +648,7 @@ def test_confirm_export_still_requires_confirmation_dialog(app_config, monkeypat
         def wait_for_timeout(self, milliseconds):
             assert milliseconds == 250
 
-    timeline = iter((0, 0, 16))
+    timeline = iter((0, 0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1))
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
 
     with pytest.raises(TmsDownloadError, match="未出现确认窗口"):
