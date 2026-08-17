@@ -291,6 +291,57 @@ def test_pipeline_records_failed_delivery_and_failed_run(
     assert {row["status"] for row in deliveries} == {"failed"}
 
 
+def test_pipeline_rejects_a_suspiciously_small_export(
+    tmp_path, app_config, make_order, write_orders_xlsx
+):
+    """人工切换 TMS 视图后自动化会继承，导出条数暴跌但所有校验都通过。
+
+    2026-08-17 17:33 实测：页面总数 38、Excel 行数 38，两者一致，条数容差和 UI
+    比对全部放行，于是照常算规则、照常发飞书。这道闸门要在写库之前拦下来。
+    """
+    pipeline = Pipeline(app_config)
+    full = write_orders_xlsx(
+        tmp_path / "full.xlsx",
+        [make_order(order_no=f"F{index:04d}") for index in range(20)],
+    )
+    pipeline.process_file(full, rule_codes=["R4"])
+
+    tiny = write_orders_xlsx(tmp_path / "tiny.xlsx", [make_order(order_no="T001")])
+    with pytest.raises(ValueError, match="疑似 TMS 视图被切换"):
+        pipeline.process_file(tiny, rule_codes=["R4"])
+
+    # 拦在写库之前：那一条订单不该进 orders 表。
+    order_nos = {
+        row["order_no"]
+        for row in _rows(app_config.runtime.database_path, "SELECT order_no FROM orders")
+    }
+    assert "T001" not in order_nos
+    statuses = [
+        row["status"]
+        for row in _rows(
+            app_config.runtime.database_path,
+            "SELECT status FROM runs ORDER BY started_at",
+        )
+    ]
+    assert statuses == ["success", "failed"]
+
+
+def test_pipeline_row_count_guard_can_be_disabled(
+    tmp_path, app_config, make_order, write_orders_xlsx
+):
+    app_config.rules.min_row_ratio = 0
+    pipeline = Pipeline(app_config)
+    full = write_orders_xlsx(
+        tmp_path / "full.xlsx",
+        [make_order(order_no=f"F{index:04d}") for index in range(20)],
+    )
+    pipeline.process_file(full, rule_codes=["R4"])
+
+    tiny = write_orders_xlsx(tmp_path / "tiny.xlsx", [make_order(order_no="T001")])
+
+    assert pipeline.process_file(tiny, rule_codes=["R4"]).row_count == 1
+
+
 def test_pipeline_rejects_unknown_or_disabled_rules(app_config):
     pipeline = Pipeline(app_config)
     with pytest.raises(ValueError, match="未知规则: RX"):
