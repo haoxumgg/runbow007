@@ -47,6 +47,17 @@ chmod +x \
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 docker compose --project-directory "$project_root" build app
 
+# buildx 的构建缓存从不自动回收：镜像本身只有约 1.9GB，但每次构建都会把
+# Playwright 的 chromium(184MB)、headless shell(115MB)、ffmpeg 和 apt 依赖
+# 再塞一份进缓存。2026-08-17 实测 51 条缓存记录占了 27.3GB，39GB 的盘用到
+# 80%，照那个速度几天就会写满。保留 5GB 热缓存让下次构建仍能复用，其余回收。
+# --keep-storage 在新版 Docker 里已改名为 --reserved-space，逐个降级尝试；
+# 清理失败绝不能让整个部署挂掉，所以最后兜一个 true。
+docker builder prune --force --keep-storage 5GB \
+  || docker builder prune --force --reserved-space 5GB \
+  || docker builder prune --force \
+  || true
+
 install -m 0644 deploy/systemd/runbow007-hourly.service /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-hourly.timer /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-arrival.service /etc/systemd/system/

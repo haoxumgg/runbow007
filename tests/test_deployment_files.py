@@ -56,6 +56,23 @@ def test_systemd_jobs_allow_full_download_window_and_alert_on_failure():
     assert "runbow007-failure@.service" in deploy_script
 
 
+def test_deploy_reclaims_build_cache_without_failing_the_deploy():
+    """每次部署都构建一次镜像，buildx 缓存从不自动回收。
+
+    2026-08-17 实测：镜像本身 1.9GB，构建缓存却堆到 27.3GB，39GB 的盘用到 80%。
+    清理必须跟在 build 后面，且自身失败不能让整个部署挂掉。
+    """
+    deploy_script = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+
+    assert "docker builder prune" in deploy_script
+    build_at = deploy_script.index("docker compose --project-directory")
+    prune_at = deploy_script.index("docker builder prune")
+    assert build_at < prune_at, "构建缓存清理必须在 build 之后"
+
+    prune_block = deploy_script[prune_at : deploy_script.index("\n\n", prune_at)]
+    assert "|| true" in prune_block, "清理失败不能中断部署"
+
+
 def test_linux_runtime_defaults_to_dry_run():
     runtime = (ROOT / "deploy" / "runtime.env.example").read_text(encoding="utf-8")
 
