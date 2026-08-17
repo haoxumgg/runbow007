@@ -49,11 +49,14 @@ class TmsDownloader:
     # that was supposed to contain it. Locator.wait_for() honours its timeout, so every
     # visibility probe goes through _visible_now() below.
     #
-    # 两个值要一起看：单次探测必须远小于循环时限，循环时限才有意义；而循环时限又必须
-    # 高于旧代码单次探测实际等待的 45 秒，否则 SPA 慢的时候反而比修复前更早放弃。
-    # 8/16 23:40 的演练就是踩了这个：500ms 探测 + 30 秒时限，导出按钮和"下载中心"
-    # 菜单都没等到。
+    # 单次探测必须远小于循环时限，循环时限才有意义。_PROBE_TIMEOUT_MS 用于一次性的
+    # 可见性判断（确认窗口、下载链接、登录表单）。
     _PROBE_TIMEOUT_MS = 1_000
+    # 查找元素分两阶段，见 _find_visible。8/17 白天的失败说明"每个候选各等 1 秒、
+    # 轮着来"在 TMS 慢的时候反而不如旧代码"死等第一个候选 45 秒"：页面卡住时每个
+    # 探测都会耗满超时，一轮扫下来就把时限用光，实际只扫了一两轮。
+    _QUICK_PROBE_MS = 250
+    _PATIENT_PROBE_MS = 15_000
     _ELEMENT_WAIT_SECONDS = 60
     _RETRY_DELAYS = (0, 60, 180)
     # The hourly timer fires every 60 minutes and a second run is refused by the file
@@ -305,7 +308,10 @@ class TmsDownloader:
         if budget_seconds is not None:
             wait_seconds = min(wait_seconds, max(budget_seconds, 60.0))
         deadline = time.monotonic() + wait_seconds
-        task_appearance_deadline = min(deadline, time.monotonic() + 5 * 60)
+        appear_minutes = self.config.tms.export_task_appear_minutes
+        task_appearance_deadline = min(
+            deadline, time.monotonic() + appear_minutes * 60
+        )
         earliest = export_started - timedelta(minutes=1)
         last_snapshot: tuple[object, ...] | None = None
         matching_task_seen = False
@@ -356,7 +362,7 @@ class TmsDownloader:
                 and time.monotonic() >= task_appearance_deadline
             ):
                 raise TmsExportTaskNotFound(
-                    "点击导出后 5 分钟内，下载中心未出现本轮匹配任务"
+                    f"点击导出后 {appear_minutes} 分钟内，下载中心未出现本轮匹配任务"
                 )
 
         raise TmsDownloadError("TMS 下载中心任务在超时时间内未完成")
@@ -418,6 +424,37 @@ class TmsDownloader:
         return True
 
     @classmethod
+    def _find_visible(
+        cls, page: object, collections: list, deadline: float
+    ) -> object | None:
+        """Two-phase element hunt for a SPA that renders duplicate, slow toolbars.
+
+        阶段一用很短的探测快速扫一遍所有候选，挑出"已经可见"的那个——TMS 会把同一
+        个工具栏渲染多份，只有一份可见，这一步就是为了跳过隐藏的副本。
+
+        阶段二在一整轮都没扫到时，对第一个候选做一次长等待。TMS 慢的时候元素只是
+        还没渲染出来，继续用短探测轮询纯属空转；把耐心押在单个候选上，正是旧代码
+        （45 秒默认超时）在这种场景下反而能成功的原因。
+        """
+        while time.monotonic() < deadline:
+            for matches in collections:
+                for index in range(matches.count()):
+                    candidate = matches.nth(index)
+                    if cls._visible_now(candidate, timeout_ms=cls._QUICK_PROBE_MS):
+                        return candidate
+            if time.monotonic() >= deadline:
+                break
+            patient = next(
+                (matches.nth(0) for matches in collections if matches.count()), None
+            )
+            if patient is not None and cls._visible_now(
+                patient, timeout_ms=cls._PATIENT_PROBE_MS
+            ):
+                return patient
+            page.wait_for_timeout(250)
+        return None
+
+    @classmethod
     def _any_visible(cls, matches: object) -> bool:
         try:
             total = matches.count()
@@ -443,14 +480,10 @@ class TmsDownloader:
             page.get_by_role("button", name=re.compile(name_pattern))
         )
         deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            for matches in collections:
-                for index in range(matches.count()):
-                    candidate = matches.nth(index)
-                    if cls._visible_now(candidate):
-                        return candidate
-            page.wait_for_timeout(250)
-        raise TmsDownloadError("页面未找到可见的导出按钮")
+        button = cls._find_visible(page, collections, deadline)
+        if button is None:
+            raise TmsDownloadError("页面未找到可见的导出按钮")
+        return button
 
     @classmethod
     def _click_first_visible_dom(cls, matches: object) -> bool:
@@ -477,17 +510,14 @@ class TmsDownloader:
     @classmethod
     def _click_visible_text(cls, page: object, text: str, *, force: bool = False) -> None:
         deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            matches = page.get_by_text(text, exact=True)
-            for index in range(matches.count()):
-                candidate = matches.nth(index)
-                if cls._visible_now(candidate):
-                    if force:
-                        # TMS 的成功提示层可能长期覆盖菜单。这里直接触发已确认
-                        # 可见菜单元素的 DOM click，避免覆盖层截获鼠标事件。
-                        candidate.evaluate("element => element.click()")
-                    else:
-                        candidate.click()
-                    return
-            page.wait_for_timeout(250)
-        raise TmsDownloadError(f"页面未找到可见元素: {text}")
+        candidate = cls._find_visible(
+            page, [page.get_by_text(text, exact=True)], deadline
+        )
+        if candidate is None:
+            raise TmsDownloadError(f"页面未找到可见元素: {text}")
+        if force:
+            # TMS 的成功提示层可能长期覆盖菜单。这里直接触发已确认可见菜单元素的
+            # DOM click，避免覆盖层截获鼠标事件。
+            candidate.evaluate("element => element.click()")
+        else:
+            candidate.click()
