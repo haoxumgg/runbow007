@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
@@ -19,6 +20,9 @@ from .notifier import FeishuClient, MessageFormatter
 from .rules import RuleEngine
 
 logger = logging.getLogger(__name__)
+
+# 行数低于这个量级时，比例判断纯属噪声（真实数据集是四位数）。
+_GUARD_MIN_BASELINE = 100
 
 
 class Pipeline:
@@ -143,21 +147,28 @@ class Pipeline:
 
         所以要有一道跟历史比的合理性检查，而且必须在写库之前拦下来。
         """
-        ratio = self.config.rules.min_row_ratio
-        if ratio <= 0:
+        low = self.config.rules.min_row_ratio
+        high = self.config.rules.max_row_ratio
+        if low <= 0 and high <= 0:
             return
-        baseline = self.store.latest_successful_row_count()
-        if baseline is None:
+        history = self.store.recent_successful_row_counts()
+        if not history:
             return
-        floor = baseline * ratio
-        if row_count >= floor:
+        baseline = int(median(history))
+        if baseline < _GUARD_MIN_BASELINE:
+            # 数据量本来就很小的时候，比例判断纯属噪声。
+            return
+        if low > 0 and row_count < baseline * low:
+            bound = f"不足 {low:.0%}（下限 {baseline * low:.0f} 行）"
+        elif high > 0 and row_count > baseline * high:
+            bound = f"超过 {high:.0%}（上限 {baseline * high:.0f} 行）"
+        else:
             return
         raise ValueError(
-            f"本轮只解析到 {row_count} 行，不足最近一次成功运行 {baseline} 行的 "
-            f"{ratio:.0%}（下限 {floor:.0f} 行），疑似 TMS 视图被切换成了别的筛选"
-            "条件，已拒绝处理以免基于残缺数据发提醒。确认 TMS 上"
-            "「AI导出数据（勿动）」视图正常后会自动恢复；月初数据重置属正常现象，"
-            "可临时调低 rules.min_row_ratio。"
+            f"本轮解析到 {row_count} 行，相对最近几次成功运行的中位数 {baseline} 行{bound}，"
+            "疑似 TMS 视图被切换成了别的筛选条件，已拒绝处理以免基于错误数据发提醒。"
+            "确认 TMS 上「AI导出数据（勿动）」视图正常后会自动恢复；月初数据重置"
+            "属正常现象，可临时调整 rules.min_row_ratio / rules.max_row_ratio。"
         )
 
     def _send_groups(

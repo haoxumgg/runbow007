@@ -302,7 +302,7 @@ def test_pipeline_rejects_a_suspiciously_small_export(
     pipeline = Pipeline(app_config)
     full = write_orders_xlsx(
         tmp_path / "full.xlsx",
-        [make_order(order_no=f"F{index:04d}") for index in range(20)],
+        [make_order(order_no=f"F{index:04d}") for index in range(200)],
     )
     pipeline.process_file(full, rule_codes=["R4"])
 
@@ -330,16 +330,74 @@ def test_pipeline_row_count_guard_can_be_disabled(
     tmp_path, app_config, make_order, write_orders_xlsx
 ):
     app_config.rules.min_row_ratio = 0
+    app_config.rules.max_row_ratio = 0
     pipeline = Pipeline(app_config)
     full = write_orders_xlsx(
         tmp_path / "full.xlsx",
-        [make_order(order_no=f"F{index:04d}") for index in range(20)],
+        [make_order(order_no=f"F{index:04d}") for index in range(200)],
     )
     pipeline.process_file(full, rule_codes=["R4"])
 
     tiny = write_orders_xlsx(tmp_path / "tiny.xlsx", [make_order(order_no="T001")])
 
     assert pipeline.process_file(tiny, rule_codes=["R4"]).row_count == 1
+
+
+def test_pipeline_rejects_a_suspiciously_large_export(
+    tmp_path, app_config, make_order, write_orders_xlsx
+):
+    """视图变大同样是错的数据。
+
+    2026-08-17 18:12 实测继承到一个 12644 行的视图（正常 4750），单向闸门放行了，
+    照常算规则、照常发飞书。
+    """
+    pipeline = Pipeline(app_config)
+    normal = write_orders_xlsx(
+        tmp_path / "normal.xlsx",
+        [make_order(order_no=f"N{index:04d}") for index in range(200)],
+    )
+    pipeline.process_file(normal, rule_codes=["R4"])
+
+    huge = write_orders_xlsx(
+        tmp_path / "huge.xlsx",
+        [make_order(order_no=f"H{index:04d}") for index in range(600)],
+    )
+    with pytest.raises(ValueError, match="超过"):
+        pipeline.process_file(huge, rule_codes=["R4"])
+
+
+def test_pipeline_row_guard_baseline_survives_one_bad_run(
+    tmp_path, app_config, make_order, write_orders_xlsx
+):
+    """基线取中位数：一次异常值不能把后续正常运行判成异常。
+
+    否则 12644 行那轮一旦通过，正常的 4750 行就成了它的 37%，反而会被拒。
+    """
+    app_config.rules.max_row_ratio = 0  # 先让异常大值能落库成为历史
+    pipeline = Pipeline(app_config)
+    for index in range(3):
+        pipeline.process_file(
+            write_orders_xlsx(
+                tmp_path / f"normal{index}.xlsx",
+                [make_order(order_no=f"N{index}{i:04d}") for i in range(200)],
+            ),
+            rule_codes=["R4"],
+        )
+    pipeline.process_file(
+        write_orders_xlsx(
+            tmp_path / "outlier.xlsx",
+            [make_order(order_no=f"O{i:04d}") for i in range(600)],
+        ),
+        rule_codes=["R4"],
+    )
+
+    app_config.rules.max_row_ratio = 1.5
+    back_to_normal = write_orders_xlsx(
+        tmp_path / "again.xlsx",
+        [make_order(order_no=f"A{i:04d}") for i in range(200)],
+    )
+
+    assert pipeline.process_file(back_to_normal, rule_codes=["R4"]).row_count == 200
 
 
 def test_pipeline_rejects_unknown_or_disabled_rules(app_config):
