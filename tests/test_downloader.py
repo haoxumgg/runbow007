@@ -141,6 +141,98 @@ def test_download_gives_up_when_run_budget_is_spent(app_config, monkeypatch):
     assert sleeps == []
 
 
+class _MenuPage:
+    """右上角全局菜单里的「下载中心」，按选择器/文本两种方式提供。"""
+
+    def __init__(self, *, by_selector=None, by_text=None):
+        self.by_selector = by_selector
+        self.by_text = by_text
+        self.gotos = []
+
+    @staticmethod
+    def _collection(item):
+        items = [item] if item is not None else []
+        return SimpleNamespace(
+            count=lambda: len(items), nth=lambda index: items[index]
+        )
+
+    def locator(self, selector):
+        assert "thorn6-icon-xiazai" in selector
+        return self._collection(self.by_selector)
+
+    def get_by_text(self, text, *, exact):
+        assert (text, exact) == ("下载中心", True)
+        return self._collection(self.by_text)
+
+    def goto(self, url, *, wait_until):
+        self.gotos.append(url)
+
+    def wait_for_timeout(self, milliseconds):
+        pass
+
+
+def test_download_center_prefers_the_icon_selector_over_text(app_config, monkeypatch):
+    """真实 DOM：<li class="menu-item"><i class="thorn6-icon-xiazai"></i> 下载中心 </li>
+
+    图标类名唯一且稳定；文本节点前后带大量空白，文本匹配今天在 10:05 和 14:05
+    第 1 次都没找到它，各白烧掉一整次尝试。
+    """
+    clicks = []
+
+    class Menu(Probeable):
+        def evaluate(self, expression):
+            clicks.append(expression)
+
+    page = _MenuPage(by_selector=Menu(True))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    TmsDownloader(app_config)._open_download_center(page)
+
+    assert clicks == ["element => element.click()"]
+    assert page.gotos == []
+
+
+def test_download_center_reloads_home_when_the_menu_is_missing(app_config, monkeypatch):
+    """找不到入口就重载首页重来。
+
+    导出任务此时已在服务端建好，页面状态不再重要；14:05 第 2 次正是靠重开浏览器
+    后 10 秒就找到了，重载比放弃整次尝试便宜得多。
+    """
+    clicks = []
+
+    class Menu(Probeable):
+        def evaluate(self, expression):
+            clicks.append(expression)
+
+    appears = Menu(True)
+    page = _MenuPage()
+    timeline = iter((0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1, 0, 0))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+
+    def reload_makes_menu_appear(url, *, wait_until):
+        page.gotos.append(url)
+        page.by_selector = appears
+
+    page.goto = reload_makes_menu_appear
+
+    TmsDownloader(app_config)._open_download_center(page)
+
+    assert page.gotos == [app_config.tms.url]
+    assert clicks == ["element => element.click()"]
+
+
+def test_download_center_gives_up_after_one_reload(app_config, monkeypatch):
+    page = _MenuPage()
+    wait = TmsDownloader._ELEMENT_WAIT_SECONDS + 1
+    timeline = iter((0, wait, 0, wait))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+
+    with pytest.raises(TmsDownloadError, match="页面未找到可见元素: 下载中心"):
+        TmsDownloader(app_config)._open_download_center(page)
+
+    assert page.gotos == [app_config.tms.url]
+
+
 def test_download_center_window_is_clamped_to_remaining_budget(app_config, monkeypatch):
     class EmptyRows:
         def filter(self, *, has_text):
@@ -169,7 +261,7 @@ def test_download_center_window_is_clamped_to_remaining_budget(app_config, monke
     timeline = iter((0, 0, 0, 61))
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
     downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
 
     with pytest.raises(TmsExportTaskNotFound):
         downloader._download_from_center(
@@ -655,7 +747,7 @@ def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
             return DownloadInfo()
 
     downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
 
     result = downloader._download_from_center(
@@ -699,7 +791,7 @@ def test_download_center_stops_early_when_new_export_task_never_appears(
     timeline = iter((0, 0, 0, 8 * 60 + 1))
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
     downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
 
     with pytest.raises(TmsExportTaskNotFound, match="8 分钟内"):
         downloader._download_from_center(
