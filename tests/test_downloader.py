@@ -141,6 +141,81 @@ def test_download_gives_up_when_run_budget_is_spent(app_config, monkeypatch):
     assert sleeps == []
 
 
+def test_attempt_watchdog_interrupts_a_hung_attempt(app_config, monkeypatch):
+    """浏览器卡死时，Playwright 超时、循环 deadline、单轮预算全部失效。
+
+    2026-08-17 18:28 一次 page.content() 挂了 70 分钟，把 19:05 那轮也堵掉。
+    SIGALRM 由内核投递，不依赖浏览器是死是活。
+    """
+    pytest.importorskip("signal")
+    import signal as signal_module
+
+    if not hasattr(signal_module, "SIGALRM"):
+        pytest.skip("平台没有 SIGALRM")
+
+    app_config.tms.attempt_timeout_seconds = 60
+    downloader = TmsDownloader(app_config)
+    alarms = []
+    monkeypatch.setattr(signal_module, "alarm", lambda seconds: alarms.append(seconds))
+
+    with downloader._attempt_watchdog():
+        pass
+
+    # 进入时按配置武装，退出时解除。
+    assert alarms == [60, 0]
+
+
+def test_attempt_watchdog_is_disabled_by_zero(app_config, monkeypatch):
+    import signal as signal_module
+
+    app_config.tms.attempt_timeout_seconds = 0
+    alarms = []
+    monkeypatch.setattr(signal_module, "alarm", lambda seconds: alarms.append(seconds))
+
+    with TmsDownloader(app_config)._attempt_watchdog():
+        pass
+
+    assert alarms == []
+
+
+def test_failure_capture_skips_the_dom_when_the_page_is_unresponsive(
+    app_config, tmp_path
+):
+    """截图失败说明浏览器已经不响应，绝不能再调 page.content()——它没有 timeout。"""
+    content_calls = []
+
+    class DeadPage:
+        def screenshot(self, *, path, timeout):
+            assert timeout == 15_000
+            raise TimeoutError("page frozen")
+
+        def content(self):
+            content_calls.append(1)
+            raise AssertionError("浏览器无响应时不该再取 HTML，那会无限期挂住")
+
+    TmsDownloader(app_config)._capture_failure(DeadPage(), "等待订单表格出数据", tmp_path)
+
+    assert content_calls == []
+    assert not list(tmp_path.iterdir())
+
+
+def test_failure_capture_saves_both_when_the_page_responds(app_config, tmp_path):
+    class LivePage:
+        def screenshot(self, *, path, timeout):
+            Path(path).write_bytes(b"png")
+
+        def content(self):
+            return "<html>frozen grid</html>"
+
+    TmsDownloader(app_config)._capture_failure(LivePage(), "查找导出按钮", tmp_path)
+
+    names = sorted(item.name for item in tmp_path.iterdir())
+    assert [name.split("-", 2)[2] for name in names] == [
+        "查找导出按钮.html",
+        "查找导出按钮.png",
+    ]
+
+
 class _MenuPage:
     """右上角全局菜单里的「下载中心」，按选择器/文本两种方式提供。"""
 

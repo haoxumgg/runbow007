@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
+import signal
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -111,7 +114,8 @@ class TmsDownloader:
                 time.sleep(delay)
             attempts_made = attempt
             try:
-                return self._download_once(dataset, state=state)
+                with self._attempt_watchdog():
+                    return self._download_once(dataset, state=state)
             except (CredentialError, TmsAuthenticationError):
                 raise
             except Exception as exc:  # browser errors are normalized at the boundary
@@ -127,6 +131,34 @@ class TmsDownloader:
         raise TmsDownloadError(
             f"TMS 下载连续 {attempts_made} 次失败{where}: {last_error}"
         ) from last_error
+
+    @contextmanager
+    def _attempt_watchdog(self) -> Iterator[None]:
+        """Hard wall-clock ceiling for one attempt, independent of the browser.
+
+        我们所有的超时都是"建议性"的：Playwright 的 timeout 靠驱动回消息才能触发，
+        循环里的 deadline 靠调用能返回才会被检查，50 分钟的单轮预算只在两次尝试
+        之间生效。浏览器渲染进程一卡死，这三层全部失效——2026-08-17 18:28 一次
+        page.content() 挂了 70 分钟，把 19:05 那轮也一并堵掉。
+
+        SIGALRM 由内核投递，不依赖浏览器是死是活，是唯一真正兜得住的一层。
+        Windows 没有 SIGALRM（CI 会在 windows-latest 上跑），那里退化成无保护。
+        """
+        seconds = self.config.tms.attempt_timeout_seconds
+        if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+            yield
+            return
+
+        def _fire(signum: int, frame: object) -> None:
+            raise TmsDownloadError(f"单次尝试超过 {seconds} 秒硬上限，已强制中断")
+
+        previous = signal.signal(signal.SIGALRM, _fire)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
 
     def _new_browser(self, playwright: object) -> tuple[object, object]:
         """Start from a clean browser unless the profile is explicitly opted into.
@@ -150,22 +182,31 @@ class TmsDownloader:
         return browser, browser.new_context(accept_downloads=True)
 
     def _capture_failure(self, page: object, step: str, run_dir: Path) -> None:
-        """Dump a screenshot and the DOM so the next failure needs no guessing."""
+        """Dump a screenshot and the DOM so the next failure needs no guessing.
+
+        截图先做，因为它能带 timeout。截图失败说明浏览器已经不响应了，这时候绝不能
+        再去调 page.content()——那个 API 不接受 timeout 参数，页面卡死时会无限期挂着。
+        2026-08-17 18:28 就是这么挂了 70 分钟，把整个 19:05 轮次也堵掉了，而这段
+        代码本来只是用来收集诊断信息的。
+        """
         if page is None:
             return
         stamp = self._local_now().strftime("%H%M%S")
         safe = re.sub(r"[^\w]+", "-", step).strip("-")
         base = run_dir / f"failure-{stamp}-{safe}"
-        for suffix, dump in (
-            (".png", lambda path: page.screenshot(path=str(path), timeout=15_000)),
-            (".html", lambda path: path.write_text(page.content(), encoding="utf-8")),
-        ):
-            target = base.with_suffix(suffix)
-            try:
-                dump(target)
-                logger.error("失败现场已保存: %s", target.name)
-            except Exception:  # pragma: no cover - diagnostics must never mask the cause
-                logger.warning("保存 %s 失败现场时出错", suffix, exc_info=True)
+        shot = base.with_suffix(".png")
+        try:
+            page.screenshot(path=str(shot), timeout=15_000)
+            logger.error("失败现场已保存: %s", shot.name)
+        except Exception:
+            logger.warning("浏览器已无响应，跳过失败现场采集", exc_info=True)
+            return
+        dom = base.with_suffix(".html")
+        try:
+            dom.write_text(page.content(), encoding="utf-8")
+            logger.error("失败现场已保存: %s", dom.name)
+        except Exception:  # pragma: no cover - diagnostics must never mask the cause
+            logger.warning("保存页面 HTML 时出错", exc_info=True)
 
     @staticmethod
     def _budget_remaining(state: _ExportState) -> float | None:
