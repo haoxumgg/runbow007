@@ -17,6 +17,8 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert "./downloads:/app/downloads" in volumes
     assert "./browser-profile:/app/browser-profile" in volumes
     assert app["environment"]["RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS"] == "600"
+    # 服务器只有 2 GiB：卡死的 Chromium 必须先撑爆容器，而不是整台机器。
+    assert app["mem_limit"] == "1200m"
 
 
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
