@@ -7,6 +7,11 @@ services:
     image: runbow007:local
     init: true
     ipc: host
+    # 服务器只有 2 GiB 内存。2026-08-17 晚上一个卡死的 headless Chromium（当时正在
+    # 渲染继承来的 12644 行错误视图）把内存吃干净，sshd fork 不出子进程，SSH 和
+    # 阿里云命令助手同时失联，最后只能强制重启。加上限之后撑爆的是容器，机器还活着。
+    mem_limit: 1200m
+    mem_swappiness: 0
     env_file:
       - ${RUNBOW007_SECRETS_FILE:-./secrets.env}
     environment:
