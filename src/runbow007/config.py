@@ -48,6 +48,7 @@ class TmsConfig:
     url: str = "https://otb.lining.com/#/"
     username: str = ""
     headless: bool = True
+    persistent_profile: bool = False
     navigation_timeout_seconds: int = 45
     download_timeout_seconds: int = 600
     grid_load_timeout_seconds: int = 180
@@ -74,6 +75,7 @@ class RulesConfig:
     unresolved_repeat_hour: int = 9
     reopen_grace_hours: int = 12
     min_row_ratio: float = 0.5
+    max_row_ratio: float = 1.5
 
 
 @dataclass(slots=True)
@@ -145,6 +147,8 @@ class AppConfig:
             raise ConfigError("rules.reopen_grace_hours 必须在 0 到 720 之间")
         if not 0 <= self.rules.min_row_ratio < 1:
             raise ConfigError("rules.min_row_ratio 必须在 0 到 1 之间（0 表示关闭）")
+        if self.rules.max_row_ratio and self.rules.max_row_ratio <= 1:
+            raise ConfigError("rules.max_row_ratio 必须大于 1（0 表示关闭）")
         if not 1 <= self.runtime.retain_days <= 3650:
             raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):

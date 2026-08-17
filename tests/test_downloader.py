@@ -348,18 +348,35 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     page = FakePage()
 
     class FakeContext:
-        pages = [page]
+        closed = False
+
+        def new_page(self):
+            return page
 
         def close(self):
             self.closed = True
 
     context = FakeContext()
 
+    class FakeBrowser:
+        closed = False
+
+        def new_context(self, **kwargs):
+            assert kwargs == {"accept_downloads": True}
+            return context
+
+        def close(self):
+            self.closed = True
+
+    browser = FakeBrowser()
+
     class FakeChromium:
         def launch_persistent_context(self, profile, **kwargs):
-            assert profile == str(app_config.runtime.browser_profile_dir)
-            assert kwargs == {"headless": True, "accept_downloads": True}
-            return context
+            raise AssertionError("默认必须是全新浏览器，不能复用持久化 profile")
+
+        def launch(self, **kwargs):
+            assert kwargs == {"headless": True}
+            return browser
 
     fake_playwright = SimpleNamespace(chromium=FakeChromium())
 
@@ -391,7 +408,9 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
     monkeypatch.setattr(
         downloader,
         "_download_from_center",
-        lambda page, export_started, ui_total, *, budget_seconds=None: FakeDownload(),
+        lambda page, export_started, ui_total, *, budget_seconds=None, step=None: (
+            FakeDownload()
+        ),
     )
 
     state = _ExportState(not_before=datetime(2026, 8, 14, 10, 8))
@@ -428,11 +447,10 @@ def test_download_once_reuses_created_export_task(app_config, monkeypatch):
             Path(target).write_bytes(b"reused workbook")
 
     page = FakePage()
-    context = SimpleNamespace(pages=[page], close=lambda: None)
+    context = SimpleNamespace(new_page=lambda: page, close=lambda: None)
+    browser = SimpleNamespace(new_context=lambda **kwargs: context, close=lambda: None)
     fake_playwright = SimpleNamespace(
-        chromium=SimpleNamespace(
-            launch_persistent_context=lambda profile, **kwargs: context
-        )
+        chromium=SimpleNamespace(launch=lambda **kwargs: browser)
     )
 
     class FakeManager:
@@ -457,7 +475,9 @@ def test_download_once_reuses_created_export_task(app_config, monkeypatch):
 
     center_calls = []
 
-    def download_from_center(page, export_started, expected_total, *, budget_seconds=None):
+    def download_from_center(
+        page, export_started, expected_total, *, budget_seconds=None, step=None
+    ):
         center_calls.append((page, export_started, expected_total))
         return FakeDownload()
 

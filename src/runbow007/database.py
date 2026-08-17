@@ -245,17 +245,22 @@ class SQLiteStore:
                     (candidate.event_key, run_id, error, failed_at.isoformat()),
                 )
 
-    def latest_successful_row_count(self) -> int | None:
-        """Row count of the most recent successful run, for anomaly detection."""
+    def recent_successful_row_counts(self, limit: int = 5) -> list[int]:
+        """Row counts of the last successful runs, newest first.
+
+        调用方取中位数当基线：单独一次"错误但通过"的运行（比如继承到 12644 行的
+        错误视图）不能把基线带偏，否则下一轮正常的 4750 行反而会被判成异常。
+        """
         with self.connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT row_count FROM runs
                 WHERE status = 'success' AND row_count IS NOT NULL AND row_count > 0
-                ORDER BY started_at DESC LIMIT 1
-                """
-            ).fetchone()
-        return int(row["row_count"]) if row else None
+                ORDER BY started_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [int(row["row_count"]) for row in rows]
 
     def complete_run(
         self,

@@ -40,6 +40,29 @@ class _ExportState:
     expected_total: int | None = None
     task_created: bool = False
     budget_deadline: float | None = None
+    last_step: str | None = None
+
+
+class _StepTracker:
+    """Name the phase we are in so a failure says *where* it went wrong.
+
+    之前失败只能看 traceback 猜环节，而且看不出"在这一步卡了多久"。这个记录当前
+    环节名和进入时间，异常时一起打出来，飞书告警里也带上。
+    """
+
+    __slots__ = ("name", "started")
+
+    def __init__(self) -> None:
+        self.name = "启动浏览器"
+        self.started = time.monotonic()
+
+    def enter(self, name: str) -> None:
+        self.name = name
+        self.started = time.monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
 
 
 class TmsDownloader:
@@ -100,9 +123,49 @@ class TmsDownloader:
                     logger.warning("下载中心未发现本轮任务，下次重试将重新执行导出")
                 last_error = exc
                 logger.exception("TMS 下载第 %s 次失败", attempt)
+        where = f"，最后卡在「{state.last_step}」" if state.last_step else ""
         raise TmsDownloadError(
-            f"TMS 下载连续 {attempts_made} 次失败: {last_error}"
+            f"TMS 下载连续 {attempts_made} 次失败{where}: {last_error}"
         ) from last_error
+
+    def _new_browser(self, playwright: object) -> tuple[object, object]:
+        """Start from a clean browser unless the profile is explicitly opted into.
+
+        持久化 profile 会把上一轮的标签页、缓存和 DOM 状态全带到下一轮。TMS 又是
+        标签页式 SPA、视图状态还按账号共享，于是每轮启动时"DOM 里有几个标签页、
+        停在哪个视图、哪些元素可见"完全不确定，所有选择器都在这片流沙上撞运气。
+        凌晨 01–07 七轮全成、白天一半在挂，差别就在于白天有人在动这个账号。
+
+        改成每轮全新浏览器 + 重新登录，用几秒登录时间换一个确定的起点。
+        """
+        headless = self.config.tms.headless
+        if self.config.tms.persistent_profile:
+            context = playwright.chromium.launch_persistent_context(
+                str(self.config.runtime.browser_profile_dir),
+                headless=headless,
+                accept_downloads=True,
+            )
+            return None, context
+        browser = playwright.chromium.launch(headless=headless)
+        return browser, browser.new_context(accept_downloads=True)
+
+    def _capture_failure(self, page: object, step: str, run_dir: Path) -> None:
+        """Dump a screenshot and the DOM so the next failure needs no guessing."""
+        if page is None:
+            return
+        stamp = self._local_now().strftime("%H%M%S")
+        safe = re.sub(r"[^\w]+", "-", step).strip("-")
+        base = run_dir / f"failure-{stamp}-{safe}"
+        for suffix, dump in (
+            (".png", lambda path: page.screenshot(path=str(path), timeout=15_000)),
+            (".html", lambda path: path.write_text(page.content(), encoding="utf-8")),
+        ):
+            target = base.with_suffix(suffix)
+            try:
+                dump(target)
+                logger.error("失败现场已保存: %s", target.name)
+            except Exception:  # pragma: no cover - diagnostics must never mask the cause
+                logger.warning("保存 %s 失败现场时出错", suffix, exc_info=True)
 
     @staticmethod
     def _budget_remaining(state: _ExportState) -> float | None:
@@ -124,69 +187,99 @@ class TmsDownloader:
         run_dir = self.config.runtime.downloads_dir / self._local_now().strftime("%Y%m%d")
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        step = _StepTracker()
+        page: Page | None = None
         with sync_playwright() as playwright:
-            logger.info("启动 TMS 浏览器")
-            context = playwright.chromium.launch_persistent_context(
-                str(self.config.runtime.browser_profile_dir),
-                headless=self.config.tms.headless,
-                accept_downloads=True,
-            )
-            page: Page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(self.config.tms.navigation_timeout_seconds * 1000)
-            page.goto(self.config.tms.url, wait_until="domcontentloaded")
-            logger.info("TMS 首页已加载，检查登录状态")
-            self._login_if_needed(page, password)
-            if not state.task_created:
-                logger.info("TMS 登录状态确认完成，打开集团订单管理")
-                self._open_order_page(page)
-                logger.info("集团订单管理已打开，应用数据筛选")
-                self._apply_filters(page, dataset)
-                ui_total = self._wait_for_orders_loaded(page)
-                if ui_total is not None and ui_total > 0:
-                    if state.expected_total is None:
-                        state.expected_total = ui_total
-                    elif state.expected_total != ui_total:
-                        logger.warning(
-                            "TMS 页面订单总数由 %s 变为 %s，继续使用首次有效总数",
-                            state.expected_total,
-                            ui_total,
-                        )
-                logger.info(
-                    "TMS 筛选完成，页面订单总数=%s，本轮匹配总数=%s",
-                    ui_total,
-                    state.expected_total,
+            browser = context = None
+            try:
+                logger.info("启动 TMS 浏览器")
+                browser, context = self._new_browser(playwright)
+                page = context.new_page()
+                page.set_default_timeout(
+                    self.config.tms.navigation_timeout_seconds * 1000
                 )
 
-                button = self._visible_locator_or_button(
-                    page, self.config.tms.selectors.download_button, r"下载|批量导出"
-                )
-                # Anchor the download-center window on the click itself. Anchoring it on
-                # the start of the run left minutes of slack in which somebody else's
-                # export could be mistaken for ours.
-                state.not_before = self._local_now()
-                self._dom_click(button, "导出")
-                logger.info("已点击导出，等待确认窗口")
-                self._confirm_export(page)
-                state.task_created = True
-                logger.info("导出任务已创建，进入下载中心核验")
-            else:
-                logger.info(
-                    "前次已创建导出任务，直接在下载中心复用；匹配总数=%s",
+                step.enter("打开 TMS 首页")
+                page.goto(self.config.tms.url, wait_until="domcontentloaded")
+                logger.info("TMS 首页已加载，检查登录状态")
+
+                step.enter("登录")
+                self._login_if_needed(page, password)
+                if not state.task_created:
+                    step.enter("打开集团订单管理")
+                    logger.info("TMS 登录状态确认完成，打开集团订单管理")
+                    self._open_order_page(page)
+
+                    step.enter("应用筛选并查询")
+                    logger.info("集团订单管理已打开，应用数据筛选")
+                    self._apply_filters(page, dataset)
+
+                    step.enter("等待订单表格出数据")
+                    ui_total = self._wait_for_orders_loaded(page)
+                    if ui_total is not None and ui_total > 0:
+                        if state.expected_total is None:
+                            state.expected_total = ui_total
+                        elif state.expected_total != ui_total:
+                            logger.warning(
+                                "TMS 页面订单总数由 %s 变为 %s，继续使用首次有效总数",
+                                state.expected_total,
+                                ui_total,
+                            )
+                    logger.info(
+                        "TMS 筛选完成，页面订单总数=%s，本轮匹配总数=%s",
+                        ui_total,
+                        state.expected_total,
+                    )
+
+                    step.enter("查找导出按钮")
+                    button = self._visible_locator_or_button(
+                        page, self.config.tms.selectors.download_button, r"下载|批量导出"
+                    )
+
+                    step.enter("点击导出并确认")
+                    # Anchor the download-center window on the click itself. Anchoring
+                    # it on the start of the run left minutes of slack in which somebody
+                    # else's export could be mistaken for ours.
+                    state.not_before = self._local_now()
+                    self._dom_click(button, "导出")
+                    logger.info("已点击导出，等待确认窗口")
+                    self._confirm_export(page)
+                    state.task_created = True
+                    logger.info("导出任务已创建，进入下载中心核验")
+                else:
+                    logger.info(
+                        "前次已创建导出任务，直接在下载中心复用；匹配总数=%s",
+                        state.expected_total,
+                    )
+
+                download = self._download_from_center(
+                    page,
+                    state.not_before,
                     state.expected_total,
+                    budget_seconds=self._budget_remaining(state),
+                    step=step,
                 )
 
-            download = self._download_from_center(
-                page,
-                state.not_before,
-                state.expected_total,
-                budget_seconds=self._budget_remaining(state),
-            )
-            suggested = Path(download.suggested_filename)
-            suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
-            target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
-            download.save_as(target)
-            logger.info("TMS Excel 已保存: %s", target.name)
-            context.close()
+                step.enter("保存 Excel")
+                suggested = Path(download.suggested_filename)
+                suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
+                target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
+                download.save_as(target)
+                logger.info("TMS Excel 已保存: %s", target.name)
+            except Exception:
+                state.last_step = step.name
+                logger.error(
+                    "失败环节: %s（该环节已耗时 %.0f 秒）", step.name, step.elapsed
+                )
+                self._capture_failure(page, step.name, run_dir)
+                raise
+            finally:
+                for closeable in (context, browser):
+                    if closeable is not None:
+                        try:
+                            closeable.close()
+                        except Exception:  # pragma: no cover - best effort teardown
+                            logger.debug("关闭浏览器时出错", exc_info=True)
 
         if not target.exists() or target.stat().st_size == 0:
             raise TmsDownloadError("浏览器报告下载完成，但文件为空")
@@ -406,9 +499,14 @@ class TmsDownloader:
         expected_total: int | None,
         *,
         budget_seconds: float | None = None,
+        step: _StepTracker | None = None,
     ) -> object:
+        if step is not None:
+            step.enter("进入下载中心")
         self._open_download_center(page)
         page.wait_for_timeout(2_000)
+        if step is not None:
+            step.enter("等待下载中心出现本轮任务")
         wait_seconds = self.config.tms.download_timeout_seconds
         if budget_seconds is not None:
             wait_seconds = min(wait_seconds, max(budget_seconds, 60.0))
@@ -420,6 +518,7 @@ class TmsDownloader:
         earliest = export_started - timedelta(minutes=1)
         last_snapshot: tuple[object, ...] | None = None
         matching_task_seen = False
+        link_missing_logged = False
 
         while time.monotonic() < deadline:
             # Element UI 会为固定列复制 tbody；只遍历包含任务名的完整任务行。
@@ -454,7 +553,18 @@ class TmsDownloader:
                     continue
                 link = row.locator("a:has(img[src*='excel'])").first
                 if not link.count() or not self._visible_now(link):
+                    # 之前这里是静默 continue，于是"任务明明成功却下不下来"完全
+                    # 看不见：2026-08-17 17:59 匹配到了 success=True 的任务，却
+                    # 一直空转到 18:08 超时。Element UI 的固定列会把 tbody 复制
+                    # 成多份，含任务名的行和含下载图标的行可能根本不是同一个 tr。
+                    if not link_missing_logged:
+                        logger.warning(
+                            "已匹配到成功的任务但找不到可见的下载链接，继续刷新重试"
+                        )
+                        link_missing_logged = True
                     continue
+                if step is not None:
+                    step.enter("下载 Excel 文件")
                 remaining = max(1, int(deadline - time.monotonic())) * 1_000
                 with page.expect_download(timeout=remaining) as info:
                     link.click()
