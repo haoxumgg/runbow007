@@ -241,12 +241,13 @@ class TmsDownloader:
             else self.config.tms.open_carryover_preset
         )
         if preset:
+            # 视图状态是账号级共享且粘性的——默认视图就是"上一次操作的视图"，别人
+            # （或人工在浏览器里）切过视图，下一轮就会继承那个。所以每轮都必须显式
+            # 选回预设，否则可能拿着别的视图的筛选范围导出，条数校验还查不出来。
             preset_trigger = selectors.preset_name or ".el-dialog:visible .page-header-title"
             page.locator(preset_trigger).first.click()
             self._click_visible_text(page, preset)
-        if dataset == "current_month" and selectors.date_from_input:
-            month_start = self._local_now().replace(day=1).strftime("%Y-%m-%d 00:00")
-            page.locator(selectors.date_from_input).first.fill(month_start)
+        # 日期不再填：预设自身已经带了日期范围，重复填写只是多一个会出错的操作。
         query = self._locator_or_button(page, selectors.query_button, r"查询")
         query.click()
         self._wait_for_grid_loading(page)
