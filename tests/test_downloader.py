@@ -170,7 +170,11 @@ def test_attempt_watchdog_is_disabled_by_zero(app_config, monkeypatch):
 
     app_config.tms.attempt_timeout_seconds = 0
     alarms = []
-    monkeypatch.setattr(signal_module, "alarm", lambda seconds: alarms.append(seconds))
+    # Windows 没有 signal.alarm，raising=False 让这条断言在两个平台上都成立：
+    # 关闭时代码提前返回，本来就不会碰它。
+    monkeypatch.setattr(
+        signal_module, "alarm", lambda seconds: alarms.append(seconds), raising=False
+    )
 
     with TmsDownloader(app_config)._attempt_watchdog():
         pass
