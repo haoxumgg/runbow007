@@ -441,8 +441,64 @@ def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
     )
 
     assert result is visible
-    # 探测必须是有界的：is_visible 会忽略 timeout 并退回 45 秒的页面默认值。
-    assert hidden.probes == [TmsDownloader._PROBE_TIMEOUT_MS]
+    # 阶段一是快扫：探测必须有界，且短到能在时限内扫完所有候选。
+    assert hidden.probes == [TmsDownloader._QUICK_PROBE_MS]
+
+
+def test_export_button_waits_patiently_when_nothing_is_visible_yet(
+    app_config, monkeypatch
+):
+    """快扫一轮全不可见时，要对首个候选长等一次，而不是继续短探测空转。
+
+    TMS 慢的时候元素只是还没渲染出来。8/17 白天 08:05/10:05 两轮就是死在"每个候选
+    各等 250ms、轮着来"——页面卡住时一轮就把时限耗光，实际只扫了一两轮。
+    """
+
+    class Slow:
+        """第一次快扫时不可见，只有拿到长超时才会"渲染出来"。"""
+
+        def __init__(self):
+            self.probes = []
+
+        def wait_for(self, *, state, timeout):
+            assert state == "visible"
+            self.probes.append(timeout)
+            if timeout < TmsDownloader._PATIENT_PROBE_MS:
+                raise TimeoutError("still rendering")
+
+    slow = Slow()
+
+    class Matches:
+        def count(self):
+            return 1
+
+        def nth(self, index):
+            assert index == 0
+            return slow
+
+    class FakePage:
+        def locator(self, selector):
+            return Matches()
+
+        def get_by_role(self, role, *, name):
+            return Matches()
+
+        def wait_for_timeout(self, milliseconds):
+            raise AssertionError("耐心等待命中后不应再退避")
+
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    result = TmsDownloader(app_config)._visible_locator_or_button(
+        FakePage(), app_config.tms.selectors.download_button, r"下载|批量导出"
+    )
+
+    assert result is slow
+    # 两个 collection 各快扫一次，然后对首个候选长等一次。
+    assert slow.probes == [
+        TmsDownloader._QUICK_PROBE_MS,
+        TmsDownloader._QUICK_PROBE_MS,
+        TmsDownloader._PATIENT_PROBE_MS,
+    ]
 
 
 def test_download_center_refresh_clicks_visible_duplicate():
@@ -577,12 +633,13 @@ def test_download_center_stops_early_when_new_export_task_never_appears(
         def wait_for_timeout(self, milliseconds):
             assert milliseconds == 2_000
 
-    timeline = iter((0, 0, 0, 301))
+    app_config.tms.export_task_appear_minutes = 8
+    timeline = iter((0, 0, 0, 8 * 60 + 1))
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
     downloader = TmsDownloader(app_config)
     monkeypatch.setattr(downloader, "_click_visible_text", lambda *args, **kwargs: None)
 
-    with pytest.raises(TmsExportTaskNotFound, match="5 分钟内"):
+    with pytest.raises(TmsExportTaskNotFound, match="8 分钟内"):
         downloader._download_from_center(
             FakePage(), datetime(2026, 8, 14, 14, 51), 4220
         )

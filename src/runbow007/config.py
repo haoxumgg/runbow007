@@ -49,6 +49,7 @@ class TmsConfig:
     headless: bool = True
     navigation_timeout_seconds: int = 45
     download_timeout_seconds: int = 600
+    export_task_appear_minutes: int = 8
     total_tolerance: int = 10
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
@@ -147,6 +148,8 @@ class AppConfig:
             raise ConfigError("tms.download_timeout_seconds 必须在 60 到 1800 之间")
         if not 0 <= self.tms.total_tolerance <= 1000:
             raise ConfigError("tms.total_tolerance 必须在 0 到 1000 之间")
+        if not 1 <= self.tms.export_task_appear_minutes <= 30:
+            raise ConfigError("tms.export_task_appear_minutes 必须在 1 到 30 之间")
         if sending:
             missing = [
                 name
