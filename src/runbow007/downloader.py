@@ -241,34 +241,71 @@ class TmsDownloader:
             else self.config.tms.open_carryover_preset
         )
         if preset:
+            # 视图状态是账号级共享且粘性的——默认视图就是"上一次操作的视图"，别人
+            # （或人工在浏览器里）切过视图，下一轮就会继承那个。所以每轮都必须显式
+            # 选回预设，否则可能拿着别的视图的筛选范围导出，条数校验还查不出来。
             preset_trigger = selectors.preset_name or ".el-dialog:visible .page-header-title"
             page.locator(preset_trigger).first.click()
             self._click_visible_text(page, preset)
-        if dataset == "current_month" and selectors.date_from_input:
-            month_start = self._local_now().replace(day=1).strftime("%Y-%m-%d 00:00")
-            page.locator(selectors.date_from_input).first.fill(month_start)
+        # 日期不再填：预设自身已经带了日期范围，重复填写只是多一个会出错的操作。
         query = self._locator_or_button(page, selectors.query_button, r"查询")
         query.click()
-        try:
-            page.wait_for_load_state("networkidle", timeout=20_000)
-        except Exception:
-            logger.info("TMS 页面持续有后台请求，跳过 networkidle 等待")
-        page.wait_for_timeout(2_000)
+        self._wait_for_grid_loading(page)
+
+    def _wait_for_grid_loading(self, page: object) -> None:
+        """Wait out the "拼命加载中" mask that TMS shows while the grid loads.
+
+        networkidle 在 TMS 上几乎必然超时（后台请求就没停过），之前只能退回"死等
+        2 秒"，数据量大时远远不够。Element UI 的加载遮罩才是准确信号：它出现代表
+        查询发出去了，它消失代表表格渲染完了。
+        """
+        mask = page.locator(".el-loading-mask")
+        # 点查询到遮罩挂上有延迟；没等到也不算错，可能查询快到遮罩一闪而过。
+        appeared = self._visible_now(mask.first, timeout_ms=5_000)
+        if not appeared:
+            logger.info("未捕获到加载遮罩，直接按超时等待表格")
+        deadline = time.monotonic() + self.config.tms.grid_load_timeout_seconds
+        while time.monotonic() < deadline:
+            if not self._any_visible(mask):
+                return
+            page.wait_for_timeout(500)
+        logger.warning(
+            "加载遮罩 %s 秒内未消失，继续尝试读取表格",
+            self.config.tms.grid_load_timeout_seconds,
+        )
 
     def _read_total(self, page: object) -> int | None:
+        """Read the order count from the *visible* pagination control.
+
+        TMS 是标签页式 SPA，打开过的页面全都留在 DOM 里，非活动的只是隐藏。实测
+        （2026-08-17 在真实页面上跑 querySelectorAll）button.pagination-total 会同时
+        匹配到两个：集团订单管理的「共 4753 条」和下载中心的「共 34920 条」。
+
+        原来硬取 .first 等于赌 DOM 顺序——赌输了就一直在读另一个标签页的分页，而且
+        那个数字永远不会变成我们要的值，等多久都没用。改成只认可见的那个。
+        """
         selector = self.config.tms.selectors.total_count
         if not selector:
             return None
+        matches = page.locator(selector)
         try:
-            text = page.locator(selector).first.inner_text(
-                timeout=self._PROBE_TIMEOUT_MS
-            )
+            count = matches.count()
         except Exception:
-            # 分页组件还没挂载。不能让它按页面默认的 45 秒硬等——那会直接搞挂
-            # 一整次尝试（2026-08-16 23:59 那轮就是 inner_text 超时抛的）。
             return None
-        match = re.search(r"([\d,]+)", text)
-        return int(match.group(1).replace(",", "")) if match else None
+        for index in range(count):
+            candidate = matches.nth(index)
+            if not self._visible_now(candidate, timeout_ms=self._QUICK_PROBE_MS):
+                continue
+            try:
+                text = candidate.inner_text(timeout=self._PROBE_TIMEOUT_MS)
+            except Exception:
+                # 分页组件还没挂载。不能按页面默认的 45 秒硬等——那会直接搞挂
+                # 一整次尝试（2026-08-16 23:59 那轮就是 inner_text 超时抛的）。
+                continue
+            match = re.search(r"([\d,]+)", text)
+            if match:
+                return int(match.group(1).replace(",", ""))
+        return None
 
     def _wait_for_orders_loaded(self, page: object) -> int | None:
         """Wait until the filtered grid actually reports rows before exporting.
@@ -283,15 +320,15 @@ class TmsDownloader:
         """
         if not self.config.tms.selectors.total_count:
             return None
-        deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
+        wait_seconds = self.config.tms.grid_load_timeout_seconds
+        deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             total = self._read_total(page)
             if total:
                 return total
             page.wait_for_timeout(500)
         raise TmsDownloadError(
-            f"筛选后 {self._ELEMENT_WAIT_SECONDS} 秒内订单总数仍为 0，"
-            "表格未加载完成，本次不执行导出"
+            f"筛选后 {wait_seconds} 秒内订单总数仍为 0，表格未加载完成，本次不执行导出"
         )
 
     def _local_now(self) -> datetime:
