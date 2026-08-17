@@ -141,7 +141,7 @@ class TmsDownloader:
                 self._open_order_page(page)
                 logger.info("集团订单管理已打开，应用数据筛选")
                 self._apply_filters(page, dataset)
-                ui_total = self._read_total(page)
+                ui_total = self._wait_for_orders_loaded(page)
                 if ui_total is not None and ui_total > 0:
                     if state.expected_total is None:
                         state.expected_total = ui_total
@@ -259,9 +259,40 @@ class TmsDownloader:
         selector = self.config.tms.selectors.total_count
         if not selector:
             return None
-        text = page.locator(selector).first.inner_text()
+        try:
+            text = page.locator(selector).first.inner_text(
+                timeout=self._PROBE_TIMEOUT_MS
+            )
+        except Exception:
+            # 分页组件还没挂载。不能让它按页面默认的 45 秒硬等——那会直接搞挂
+            # 一整次尝试（2026-08-16 23:59 那轮就是 inner_text 超时抛的）。
+            return None
         match = re.search(r"([\d,]+)", text)
         return int(match.group(1).replace(",", "")) if match else None
+
+    def _wait_for_orders_loaded(self, page: object) -> int | None:
+        """Wait until the filtered grid actually reports rows before exporting.
+
+        _apply_filters 只固定等 2 秒，而 networkidle 在 TMS 上几乎必然超时跳过，
+        所以经常在"分页组件已渲染、数据还没回来"的瞬间读到 0。带着 0 继续往下走
+        就是在空表格上点导出：TMS 没有数据可导，不会创建任何任务，然后在下载中心
+        白等 8 分钟才发现（2026-08-17 15:05 那轮为此烧掉 9 分钟）。
+
+        这里改成轮询等真实条数，等不到就快速失败——把时间留给下一次重试，而不是
+        喂给一个注定无效的导出。
+        """
+        if not self.config.tms.selectors.total_count:
+            return None
+        deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            total = self._read_total(page)
+            if total:
+                return total
+            page.wait_for_timeout(500)
+        raise TmsDownloadError(
+            f"筛选后 {self._ELEMENT_WAIT_SECONDS} 秒内订单总数仍为 0，"
+            "表格未加载完成，本次不执行导出"
+        )
 
     def _local_now(self) -> datetime:
         # TMS 下载中心显示的是配置时区的无时区时间，统一成同口径后再比较。

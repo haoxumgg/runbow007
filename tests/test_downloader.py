@@ -383,6 +383,66 @@ def test_download_once_reuses_created_export_task(app_config, monkeypatch):
     assert center_calls == [(page, state.not_before, 4177)]
 
 
+class _GridPage:
+    """筛选后分页组件先渲染出来显示 0，过一会儿才回填真实条数。"""
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.waits = 0
+
+    def locator(self, selector):
+        text = self.texts.pop(0) if self.texts else ""
+        return SimpleNamespace(
+            first=SimpleNamespace(inner_text=lambda **kwargs: text)
+        )
+
+    def wait_for_timeout(self, milliseconds):
+        self.waits += 1
+
+
+def test_waits_for_grid_to_report_rows_before_exporting(app_config, monkeypatch):
+    """读到 0 说明表格还没出数据，必须等到真实条数再点导出。"""
+    page = _GridPage(["共 0 条", "共 0 条", "共 4,750 条"])
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    total = TmsDownloader(app_config)._wait_for_orders_loaded(page)
+
+    assert total == 4750
+    assert page.waits == 2
+
+
+def test_refuses_to_export_against_an_empty_grid(app_config, monkeypatch):
+    """等不到数据就快速失败。
+
+    带着 0 往下走会在空表格上点导出，TMS 不建任务，之后在下载中心白等 8 分钟
+    ——2026-08-17 15:05 那轮就是这样烧掉 9 分钟的。
+    """
+    page = _GridPage(["共 0 条"] * 3)
+    timeline = iter((0, 0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1))
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+
+    with pytest.raises(TmsDownloadError, match="订单总数仍为 0"):
+        TmsDownloader(app_config)._wait_for_orders_loaded(page)
+
+
+def test_missing_pagination_element_does_not_block_for_the_page_default(app_config):
+    """分页组件没挂载时 inner_text 不能硬等 45 秒——那会搞挂整次尝试。"""
+
+    class Missing:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def inner_text(self, **kwargs):
+            assert kwargs == {"timeout": TmsDownloader._PROBE_TIMEOUT_MS}
+            raise TimeoutError("locator not attached")
+
+    page = SimpleNamespace(locator=lambda selector: Missing())
+
+    assert TmsDownloader(app_config)._read_total(page) is None
+
+
 def test_read_total_and_locator_fallback(app_config):
     class FakeLocator:
         first = None
@@ -391,7 +451,9 @@ def test_read_total_and_locator_fallback(app_config):
             self.first = self
             self.text = text
 
-        def inner_text(self):
+        def inner_text(self, **kwargs):
+            # 分页组件没挂载时 inner_text 会按页面默认的 45 秒硬等，必须给显式超时。
+            assert kwargs == {"timeout": TmsDownloader._PROBE_TIMEOUT_MS}
             return self.text
 
     class FakePage:
