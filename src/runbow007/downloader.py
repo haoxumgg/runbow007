@@ -325,6 +325,43 @@ class TmsDownloader:
         # 最新任务时间、状态和条数才是最终确认依据，因此这里继续轮询下载中心。
         logger.info("未捕获到导出成功提示，继续在下载中心核验任务")
 
+    def _open_download_center(self, page: object) -> None:
+        """Reach the download centre without relying on a text match.
+
+        右上角这个入口在真实页面里长这样（2026-08-17 从 DOM 抓的）：
+
+            <ul class="right_menu">
+              <li class="menu-item"><i class="thorn6-icon thorn6-icon-xiazai"></i>
+                下载中心
+              </li>
+
+        图标类名唯一且稳定，跟导出按钮用的 thorn6-icon-daoru 是同一套模式；而
+        get_by_text("下载中心", exact=True) 匹配的文本节点前后带大量空白，今天
+        10:05 和 14:05 第 1 次都没找到它，各白烧掉一整次尝试。
+
+        再找不到就重新加载首页重来一次：导出任务此时已经在服务端建好了，页面状态
+        不再重要，换一份干净的 DOM 比放弃整次尝试便宜得多——14:05 第 2 次正是靠
+        重开浏览器后 10 秒就找到了。
+        """
+        selector = self.config.tms.selectors.download_center_menu
+        for attempt in range(2):
+            collections = []
+            if selector:
+                collections.append(page.locator(selector))
+            collections.append(page.get_by_text("下载中心", exact=True))
+            deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
+            menu = self._find_visible(page, collections, deadline)
+            if menu is not None:
+                # 导出成功提示层可能盖住菜单，用 DOM click 避免覆盖层截获鼠标事件。
+                menu.evaluate("element => element.click()")
+                return
+            if attempt:
+                break
+            logger.warning("未找到下载中心入口，重新加载首页后重试")
+            page.goto(self.config.tms.url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2_000)
+        raise TmsDownloadError("页面未找到可见元素: 下载中心")
+
     def _download_from_center(
         self,
         page: object,
@@ -333,7 +370,7 @@ class TmsDownloader:
         *,
         budget_seconds: float | None = None,
     ) -> object:
-        self._click_visible_text(page, "下载中心", force=True)
+        self._open_download_center(page)
         page.wait_for_timeout(2_000)
         wait_seconds = self.config.tms.download_timeout_seconds
         if budget_seconds is not None:

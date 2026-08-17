@@ -40,6 +40,7 @@ class TmsSelectors:
     download_button: str = (
         "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
     )
+    download_center_menu: str = "ul.right_menu li.menu-item:has(.thorn6-icon-xiazai)"
 
 
 @dataclass(slots=True)
