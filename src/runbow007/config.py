@@ -73,6 +73,7 @@ class RulesConfig:
     wms_lead_minutes: int = 90
     unresolved_repeat_hour: int = 9
     reopen_grace_hours: int = 12
+    min_row_ratio: float = 0.5
 
 
 @dataclass(slots=True)
@@ -142,6 +143,8 @@ class AppConfig:
             raise ConfigError("rules.unresolved_repeat_hour 必须在 0 到 23 之间")
         if not 0 <= self.rules.reopen_grace_hours <= 24 * 30:
             raise ConfigError("rules.reopen_grace_hours 必须在 0 到 720 之间")
+        if not 0 <= self.rules.min_row_ratio < 1:
+            raise ConfigError("rules.min_row_ratio 必须在 0 到 1 之间（0 表示关闭）")
         if not 1 <= self.runtime.retain_days <= 3650:
             raise ConfigError("runtime.retain_days 必须在 1 到 3650 之间")
         if not self.tms.url.startswith("https://"):

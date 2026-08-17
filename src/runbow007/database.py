@@ -245,6 +245,18 @@ class SQLiteStore:
                     (candidate.event_key, run_id, error, failed_at.isoformat()),
                 )
 
+    def latest_successful_row_count(self) -> int | None:
+        """Row count of the most recent successful run, for anomaly detection."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT row_count FROM runs
+                WHERE status = 'success' AND row_count IS NOT NULL AND row_count > 0
+                ORDER BY started_at DESC LIMIT 1
+                """
+            ).fetchone()
+        return int(row["row_count"]) if row else None
+
     def complete_run(
         self,
         run_id: str,
