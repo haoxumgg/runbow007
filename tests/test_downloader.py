@@ -475,17 +475,34 @@ def test_download_once_reuses_created_export_task(app_config, monkeypatch):
     assert center_calls == [(page, state.not_before, 4177)]
 
 
-class _GridPage:
-    """筛选后分页组件先渲染出来显示 0，过一会儿才回填真实条数。"""
+class _GridCell(Probeable):
+    def __init__(self, text, *, visible=True):
+        super().__init__(visible)
+        self.text = text
 
-    def __init__(self, texts):
-        self.texts = list(texts)
+    def inner_text(self, **kwargs):
+        return self.text
+
+
+class _GridPage:
+    """筛选后分页组件先渲染出来显示 0，过一会儿才回填真实条数。
+
+    每次 locator() 返回一批候选，模拟 TMS 标签页式 SPA 里同时存在的多个分页控件。
+    """
+
+    def __init__(self, batches):
+        self.batches = [
+            [c if isinstance(c, _GridCell) else _GridCell(c) for c in batch]
+            if isinstance(batch, list)
+            else [_GridCell(batch)]
+            for batch in batches
+        ]
         self.waits = 0
 
     def locator(self, selector):
-        text = self.texts.pop(0) if self.texts else ""
+        cells = self.batches.pop(0) if self.batches else []
         return SimpleNamespace(
-            first=SimpleNamespace(inner_text=lambda **kwargs: text)
+            count=lambda: len(cells), nth=lambda index: cells[index]
         )
 
     def wait_for_timeout(self, milliseconds):
@@ -503,6 +520,46 @@ def test_waits_for_grid_to_report_rows_before_exporting(app_config, monkeypatch)
     assert page.waits == 2
 
 
+def test_waits_out_the_loading_mask(app_config, monkeypatch):
+    """TMS 点查询后会盖一层「拼命加载中」；它消失才代表表格渲染完。
+
+    networkidle 在 TMS 上几乎必然超时（后台请求就没停过），之前只能死等 2 秒。
+    """
+    states = [True, True, False]
+
+    class Mask(Probeable):
+        def __init__(self):
+            super().__init__(True)
+
+        def wait_for(self, *, state, timeout):
+            assert state == "visible"
+            if not states.pop(0):
+                raise TimeoutError("mask gone")
+
+    mask = Mask()
+
+    class FakePage:
+        def __init__(self):
+            self.waits = 0
+
+        def locator(self, selector):
+            assert selector == ".el-loading-mask"
+            return SimpleNamespace(
+                first=mask, count=lambda: 1, nth=lambda index: mask
+            )
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits += 1
+
+    page = FakePage()
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    TmsDownloader(app_config)._wait_for_grid_loading(page)
+
+    # 遮罩出现 → 还在 → 消失后返回，中间退避一次。
+    assert page.waits == 1
+
+
 def test_refuses_to_export_against_an_empty_grid(app_config, monkeypatch):
     """等不到数据就快速失败。
 
@@ -510,7 +567,8 @@ def test_refuses_to_export_against_an_empty_grid(app_config, monkeypatch):
     ——2026-08-17 15:05 那轮就是这样烧掉 9 分钟的。
     """
     page = _GridPage(["共 0 条"] * 3)
-    timeline = iter((0, 0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1))
+    wait = app_config.tms.grid_load_timeout_seconds
+    timeline = iter((0, 0, wait + 1))
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
 
     with pytest.raises(TmsDownloadError, match="订单总数仍为 0"):
@@ -536,21 +594,12 @@ def test_missing_pagination_element_does_not_block_for_the_page_default(app_conf
 
 
 def test_read_total_and_locator_fallback(app_config):
-    class FakeLocator:
-        first = None
-
-        def __init__(self, text=""):
-            self.first = self
-            self.text = text
-
-        def inner_text(self, **kwargs):
-            # 分页组件没挂载时 inner_text 会按页面默认的 45 秒硬等，必须给显式超时。
-            assert kwargs == {"timeout": TmsDownloader._PROBE_TIMEOUT_MS}
-            return self.text
-
     class FakePage:
         def locator(self, selector):
-            return FakeLocator("共 1,211 条")
+            cells = [_GridCell("共 1,211 条")]
+            return SimpleNamespace(
+                count=lambda: len(cells), nth=lambda index: cells[index]
+            )
 
         def get_by_role(self, role, *, name):
             assert role == "button"
@@ -561,6 +610,25 @@ def test_read_total_and_locator_fallback(app_config):
     app_config.tms.selectors.total_count = ""
     assert downloader._read_total(FakePage()) is None
     assert downloader._locator_or_button(FakePage(), "", r"下载") == "fallback-button"
+
+
+def test_read_total_ignores_the_hidden_tab_pagination(app_config):
+    """TMS 是标签页式 SPA，button.pagination-total 会同时匹配到多个。
+
+    2026-08-17 实测：集团订单管理「共 4753 条」和下载中心「共 34920 条」同时在
+    DOM 里。硬取 .first 等于赌 DOM 顺序，赌输了就一直读另一个标签页的数字。
+    """
+    hidden = _GridCell("共 34920 条", visible=False)
+    active = _GridCell("共 4,753 条")
+
+    class FakePage:
+        def locator(self, selector):
+            cells = [hidden, active]
+            return SimpleNamespace(
+                count=lambda: len(cells), nth=lambda index: cells[index]
+            )
+
+    assert TmsDownloader(app_config)._read_total(FakePage()) == 4753
 
 
 def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
