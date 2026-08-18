@@ -104,7 +104,12 @@ class FakeCollection:
 
 
 class FakePage:
-    def __init__(self, *, css=None, role=None, text=None, rows=None, download=None):
+    def __init__(
+        self, *, css=None, role=None, text=None, rows=None, download=None, responses=None
+    ):
+        self.responses = responses or []
+        self.listeners = []
+        self.removed = []
         self.css = css or {}
         self.role = role or {}
         self.text = text or {}
@@ -125,6 +130,15 @@ class FakePage:
 
     def get_by_text(self, value, *, exact=True):
         return FakeCollection(_as_list(self.text.get(value)))
+
+    def on(self, event, handler):
+        assert event == "response"
+        self.listeners.append(handler)
+        for response in self.responses:
+            handler(response)
+
+    def remove_listener(self, event, handler):
+        self.removed.append(event)
 
     def wait_for_timeout(self, milliseconds):
         self.waits.append(milliseconds)
@@ -833,7 +847,7 @@ def test_export_clicks_the_button_then_the_confirmation(app_config, clock):
         text={"下载任务添加成功": FakeElement("下载任务添加成功")},
     )
 
-    TmsDownloader(app_config)._export(page)
+    TmsDownloader(app_config)._export(page, _ExportState(not_before=EXPORT_CLICKED_AT))
 
     assert page.css[selectors.export_button].clicks == ["real"]
     assert page.role["确定"].clicks == ["real"]
@@ -847,7 +861,7 @@ def test_export_accepts_a_toast_that_already_disappeared(app_config, clock):
         text={"下载任务添加成功": FakeElement(visible=False)},
     )
 
-    TmsDownloader(app_config)._export(page)
+    TmsDownloader(app_config)._export(page, _ExportState(not_before=EXPORT_CLICKED_AT))
 
     assert page.role["确定"].clicks == ["real"]
 
@@ -859,7 +873,62 @@ def test_export_requires_the_confirmation_dialog(app_config, clock):
     )
 
     with pytest.raises(TmsDownloadError, match="页面未找到可见元素: 确定"):
-        TmsDownloader(app_config)._export(page)
+        TmsDownloader(app_config)._export(page, _ExportState(not_before=EXPORT_CLICKED_AT))
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return self.payload
+
+
+def test_export_remembers_the_task_id_returned_by_tms(app_config, clock):
+    """建任务的接口如果把任务号回给我们，本轮该下哪一个就是确定的。"""
+    state = _ExportState(not_before=EXPORT_CLICKED_AT)
+    page = FakePage(
+        css={app_config.tms.selectors.export_button: FakeElement("导出")},
+        role={"确定": FakeElement("确定")},
+        text={"下载任务添加成功": FakeElement("下载任务添加成功")},
+        responses=[
+            FakeResponse({"success": True, "data": {"id": 814690, "userId": 42}}),
+            FakeResponse(ValueError("不是 JSON")),
+        ],
+    )
+
+    TmsDownloader(app_config)._export(page, state)
+
+    assert state.export_task_ids == (814690, 42)
+    assert page.removed == ["response"]
+
+
+def test_export_without_a_task_id_falls_back_quietly(app_config, clock):
+    state = _ExportState(not_before=EXPORT_CLICKED_AT)
+    page = FakePage(
+        css={app_config.tms.selectors.export_button: FakeElement("导出")},
+        role={"确定": FakeElement("确定")},
+        text={"下载任务添加成功": FakeElement("下载任务添加成功")},
+        responses=[FakeResponse({"code": 0, "msg": "下载任务添加成功"})],
+    )
+
+    TmsDownloader(app_config)._export(page, state)
+
+    assert state.export_task_ids == ()
+
+
+@pytest.mark.parametrize(
+    "href,expected",
+    [
+        ("*.exportFileDowload?id=814690&authorization=undefined", 814690),
+        ("*.exportFileDowload?authorization=undefined&id=99", 99),
+        ("*.exportFileDowload", None),
+    ],
+)
+def test_task_id_is_read_out_of_the_download_href(href, expected):
+    assert TmsDownloader._href_task_id(href) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +1024,36 @@ def _state(app_config):
 
 def _stamp(moment, *, minutes=0):
     return (moment - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M")
+
+
+def test_known_task_id_beats_taking_the_newest(app_config, clock):
+    """拿到任务号就不用猜了：哪怕别人的导出更新，也认我们自己那一号。"""
+    state, _ = _state(app_config)
+    state.export_task_ids = (814653,)
+    rows = [
+        _row("2026-08-18 13:41", href="a.exportFileDowload?id=814690"),  # 别人的，更新
+        _row("2026-08-18 13:40", href="a.exportFileDowload?id=814653"),  # 我们的
+    ]
+    page = _center_page(app_config, rows, download=SimpleNamespace(name="excel"))
+
+    TmsDownloader(app_config)._wait_for_export_file(page, state, _StepTracker())
+
+    link = "a[href*='exportFileDowload'][href=\"a.exportFileDowload?id=%s\"]"
+    assert page.css[link % "814653"].clicks == ["real"]
+    assert page.css[link % "814690"].clicks == []
+
+
+def test_unmatched_task_id_falls_back_to_the_newest(app_config, clock):
+    """抓到的号在页面上对不上时，退回原来的判断，不能因此卡死。"""
+    state, _ = _state(app_config)
+    state.export_task_ids = (999999,)
+    rows = [_row("2026-08-18 13:41", href="a.exportFileDowload?id=814690")]
+    page = _center_page(app_config, rows, download=SimpleNamespace(name="excel"))
+
+    TmsDownloader(app_config)._wait_for_export_file(page, state, _StepTracker())
+
+    link = 'a[href*=\'exportFileDowload\'][href="a.exportFileDowload?id=814690"]'
+    assert page.css[link].clicks == ["real"]
 
 
 def test_export_file_takes_the_newest_successful_task_in_the_window(app_config, clock):
