@@ -44,9 +44,6 @@ class _ExportState:
     task_created: bool = False
     budget_deadline: float | None = None
     last_step: str | None = None
-    #: 点「确定」时从 TMS 响应里抓到的候选任务号。拿得到就能精确锁定本轮文件，
-    #: 不用再靠「时间窗 + 取最新」去猜；拿不到就是空的，退回猜的那套。
-    export_task_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,32 +103,6 @@ _SCRAPE_DOWNLOAD_ROWS = """
 """
 
 _ROW_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
-_HREF_TASK_ID = re.compile(r"[?&]id=(\d+)")
-
-
-def _candidate_task_ids(payload: object) -> Iterator[int]:
-    """Pull every id-looking integer out of a JSON payload.
-
-    我们不知道 TMS 建导出任务的接口长什么样，所以不猜字段名：把所有以 id 结尾的
-    键的整数值都收下来当候选，最后靠「这个号在不在下载中心某一行的 href 里」来
-    验证。候选只会缩小范围，验证不过就当没抓到。
-    """
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, (int, str)) and str(key).lower().endswith("id"):
-                try:
-                    number = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if number > 0:
-                    yield number
-            else:
-                yield from _candidate_task_ids(value)
-    elif isinstance(payload, list):
-        for item in payload:
-            yield from _candidate_task_ids(item)
 
 
 class TmsDownloader:
@@ -327,7 +298,7 @@ class TmsDownloader:
                     # 归属判断的时间窗必须锚在「点导出」这一刻，锚在整轮开始会留出
                     # 几分钟空档，别人的导出会被误认成我们的。
                     state.not_before = self._local_now()
-                    self._export(page, state)
+                    self._export(page)
                     state.task_created = True
 
                 step.enter("步骤四 进入下载中心")
@@ -624,69 +595,28 @@ class TmsDownloader:
                 return int(match.group(1).replace(",", ""))
         return None
 
-    def _export(self, page: object, state: _ExportState) -> None:
-        """点「导出」→「确定」，顺手记下 TMS 在这期间返回的任务号。
-
-        下载中心那一行的下载链接长这样：
-
-            <a href="*.exportFileDowload?id=814690&authorization=undefined">
-
-        里面的 id 是服务端建任务时分配的、全页面唯一的编号。如果建任务的接口把它
-        回给了我们，本轮要下载哪一个就是确定的，不用再靠「功能名 + 时间窗 + 取最新」
-        去猜——那套猜法在别人同时导出时理论上会抓错。抓不到就什么都不影响。
-        """
+    def _export(self, page: object) -> None:
         selectors = self.config.tms.selectors
-        responses: list[object] = []
-        page.on("response", responses.append)
-        try:
-            self._click(
-                self._wait_visible(page, selectors.export_button, "导出"),
-                "导出",
-            )
-            logger.info("已点击导出，等待确认窗口")
-            self._click(
-                self._wait_visible_any(
-                    page, [page.get_by_role("button", name="确定")], "确定"
-                ),
-                "确定",
-            )
-            toast = page.get_by_text("下载任务添加成功", exact=False)
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if self._any_visible(toast):
-                    logger.info("导出任务已创建")
-                    break
-                page.wait_for_timeout(250)
-            else:
-                # 成功提示是短暂 toast，页面慢时可能在定位前就消失了。
-                logger.info("未捕获到导出成功提示，改由下载中心核验")
-        finally:
-            try:
-                page.remove_listener("response", responses.append)
-            except Exception:  # pragma: no cover - 监听器清理失败不该影响主流程
-                logger.debug("移除响应监听器时出错", exc_info=True)
-        state.export_task_ids = self._collect_task_ids(responses)
-
-    @staticmethod
-    def _collect_task_ids(responses: list) -> tuple[int, ...]:
-        found: dict[int, None] = {}
-        for response in responses:
-            try:
-                payload = response.json()
-            except Exception:
-                continue  # 不是 JSON，或者响应体已经拿不到了
-            for number in _candidate_task_ids(payload):
-                found.setdefault(number, None)
-        if found:
-            logger.info("导出接口返回的候选任务号: %s", sorted(found))
-        else:
-            logger.info("导出接口没有返回可用的任务号，按时间窗匹配本轮任务")
-        return tuple(found)
-
-    @staticmethod
-    def _href_task_id(href: str | None) -> int | None:
-        match = _HREF_TASK_ID.search(href or "")
-        return int(match.group(1)) if match else None
+        self._click(
+            self._wait_visible(page, selectors.export_button, "导出"),
+            "导出",
+        )
+        logger.info("已点击导出，等待确认窗口")
+        self._click(
+            self._wait_visible_any(
+                page, [page.get_by_role("button", name="确定")], "确定"
+            ),
+            "确定",
+        )
+        toast = page.get_by_text("下载任务添加成功", exact=False)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self._any_visible(toast):
+                logger.info("导出任务已创建")
+                return
+            page.wait_for_timeout(250)
+        # 成功提示是短暂 toast，页面慢时可能在定位前就消失了。下载中心才是最终依据。
+        logger.info("未捕获到导出成功提示，改由下载中心核验")
 
     # ------------------------------------------------------------------
     # 步骤四：下载中心 → 找到本轮那一行 → 点下载图标
@@ -773,18 +703,6 @@ class TmsDownloader:
                     )
                     last_snapshot = snapshot
                 ready = [task for task in mine if task.succeeded and task.href]
-                exact = [
-                    task
-                    for task in ready
-                    if self._href_task_id(task.href) in state.export_task_ids
-                ]
-                if exact:
-                    # 链接里的 id 和导出接口返回的任务号对上了，这就是本轮那一份，
-                    # 不用再拿「最新」去猜。时间窗仍然留着兜底，挡住万一混进来的旧号。
-                    logger.info(
-                        "按任务号 %s 精确锁定本轮文件", self._href_task_id(exact[0].href)
-                    )
-                    ready = exact
                 if ready:
                     step.enter("步骤四 下载 Excel")
                     return self._click_download_link(page, ready[0], deadline)
