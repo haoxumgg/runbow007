@@ -114,6 +114,9 @@ class TmsDownloader:
     # 查找元素分两阶段，见 _find_visible。8/17 白天的失败说明"每个候选各等 1 秒、
     # 轮着来"在 TMS 慢的时候反而不如旧代码"死等第一个候选 45 秒"：页面卡住时每个
     # 探测都会耗满超时，一轮扫下来就把时限用光，实际只扫了一两轮。
+    # 真实下载要么几秒内开始，要么就不会来。把整轮剩余额度（首轮约 600 秒）全押在
+    # 一次点击上，只会把直取兜底推到根本轮不到的位置——2026-08-18 那版就是这么写的。
+    _DOWNLOAD_EVENT_WAIT_MS = 30_000
     _QUICK_PROBE_MS = 250
     _PATIENT_PROBE_MS = 15_000
     _ELEMENT_WAIT_SECONDS = 60
@@ -666,8 +669,9 @@ class TmsDownloader:
         href = self._link_href(link)
         if href:
             logger.info("命中下载链接: %s", href)
+        wait_ms = min(timeout_ms, self._DOWNLOAD_EVENT_WAIT_MS)
         try:
-            with page.expect_download(timeout=timeout_ms) as info:
+            with page.expect_download(timeout=wait_ms) as info:
                 link.dispatch_event("click")
             return info.value
         except TmsDownloadError:

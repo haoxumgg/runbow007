@@ -1341,3 +1341,38 @@ def test_take_download_lets_the_hard_attempt_ceiling_through(app_config):
 
     with pytest.raises(TmsDownloadError, match="硬上限"):
         TmsDownloader(app_config)._take_download(Page(), Link(), timeout_ms=1_000)
+
+
+def test_download_event_wait_is_capped(app_config):
+    """点击等下载只给固定的短预算，剩下的额度留给直取兜底。"""
+    seen = {}
+
+    class Link:
+        def evaluate(self, expression):
+            return "https://otb.lining.com/*.exportFileDowload?id=1"
+
+        def dispatch_event(self, event):
+            pass
+
+    class Info:
+        value = "download"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Page:
+        def expect_download(self, *, timeout):
+            seen["timeout"] = timeout
+            return Info()
+
+    downloader = TmsDownloader(app_config)
+    # 整轮剩余 600 秒，但等待下载事件只应拿到 30 秒
+    assert downloader._take_download(Page(), Link(), timeout_ms=600_000) == "download"
+    assert seen["timeout"] == TmsDownloader._DOWNLOAD_EVENT_WAIT_MS
+
+    # 剩余额度比上限还小时，以剩余额度为准，不得反过来放大
+    downloader._take_download(Page(), Link(), timeout_ms=5_000)
+    assert seen["timeout"] == 5_000
