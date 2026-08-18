@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from runbow007 import downloader as downloader_module
 from runbow007.credentials import CredentialError
 from runbow007.downloader import (
     DownloadResult,
@@ -847,15 +848,22 @@ def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
         first = None
 
         def __init__(self):
-            super().__init__(True)
+            super().__init__(False)
             self.first = self
-            self.clicked = False
+            self.dispatched = []
 
         def count(self):
             return 1
 
+        def evaluate(self, expression):
+            assert expression == "el => el.href"
+            return "https://otb.lining.com/*.exportFileDowload?id=814329"
+
+        def dispatch_event(self, event):
+            self.dispatched.append(event)
+
         def click(self):
-            self.clicked = True
+            raise AssertionError("下载必须走 dispatch_event，不做可见性/命中判定")
 
     class Row:
         def __init__(self, text, link=None):
@@ -922,7 +930,9 @@ def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
     )
 
     assert result is expected_download
-    assert link.clicked is True
+    assert link.dispatched == ["click"]
+    # 下载链接不可见（Probeable(False)）也照样取到文件：可见性判定已从这条路径移除。
+    assert link.probes == []
 
 
 def test_download_center_stops_early_when_new_export_task_never_appears(
@@ -1080,3 +1090,254 @@ def test_force_click_uses_dom_click_when_toast_covers_menu(app_config):
     )
 
     assert evaluated == ["element => element.click()"]
+
+
+def test_download_center_falls_back_to_direct_fetch(app_config, monkeypatch, tmp_path):
+    """点击没换来 download 事件时，用链接地址走浏览器会话直取。"""
+
+    class Link:
+        first = None
+
+        def __init__(self):
+            self.first = self
+            self.dispatched = []
+
+        def count(self):
+            return 1
+
+        def evaluate(self, expression):
+            assert expression == "el => el.href"
+            return "https://otb.lining.com/*.exportFileDowload?id=814329"
+
+        def dispatch_event(self, event):
+            self.dispatched.append(event)
+
+    class Row:
+        def __init__(self, text, link):
+            self.text = text
+            self.link = link
+
+        def inner_text(self):
+            return self.text
+
+        def locator(self, selector):
+            assert selector == "a:has(img[src*='excel'])"
+            return self.link
+
+    link = Link()
+    rows = [Row("maintainCompanyOrderPage\n成功\n2026-08-18 09:07\n4825\n10845", link)]
+
+    class Rows:
+        def filter(self, *, has_text):
+            return self
+
+        def count(self):
+            return len(rows)
+
+        def nth(self, index):
+            return rows[index]
+
+    class Response:
+        ok = True
+        status = 200
+        headers = {"content-disposition": 'attachment; filename="current_month.xls"'}
+
+        def body(self):
+            return b"\xd0\xcf\x11\xe0excel-bytes"
+
+    class Request:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url):
+            self.urls.append(url)
+            return Response()
+
+    class Context:
+        def __init__(self):
+            self.request = Request()
+
+    class NoDownload:
+        """点击照常派发，但等待期内始终没有 download 事件（真实的失败形态）。"""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            raise TimeoutError("等待下载超时")
+
+    class FakePage:
+        def __init__(self):
+            self.context = Context()
+            self.waits = []
+
+        def locator(self, selector):
+            assert selector == "tr"
+            return Rows()
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+        def expect_download(self, *, timeout):
+            assert timeout > 0
+            return NoDownload()
+
+    page = FakePage()
+    downloader = TmsDownloader(app_config)
+    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+    result = downloader._download_from_center(
+        page, datetime(2026, 8, 18, 9, 6), 4825
+    )
+
+    assert link.dispatched == ["click"]
+    assert page.context.request.urls == [
+        "https://otb.lining.com/*.exportFileDowload?id=814329"
+    ]
+    assert result.suggested_filename == "current_month.xls"
+    target = tmp_path / "saved.xls"
+    result.save_as(target)
+    assert target.read_bytes() == b"\xd0\xcf\x11\xe0excel-bytes"
+    # 只有进下载中心后那一次固定等待，没有进入"刷新—重试"的空转
+    assert page.waits == [2_000]
+
+
+def test_direct_fetch_rejects_failed_and_empty_responses(app_config):
+    class Response:
+        def __init__(self, *, ok, status, body):
+            self.ok = ok
+            self.status = status
+            self.headers = {}
+            self._body = body
+
+        def body(self):
+            return self._body
+
+    class Request:
+        def __init__(self, response):
+            self.response = response
+
+        def get(self, url):
+            return self.response
+
+    class Page:
+        def __init__(self, response):
+            self.context = SimpleNamespace(request=Request(response))
+
+    downloader = TmsDownloader(app_config)
+
+    with pytest.raises(TmsDownloadError, match="HTTP 502"):
+        downloader._fetch_download(Page(Response(ok=False, status=502, body=b"")), "u")
+
+    with pytest.raises(TmsDownloadError, match="空文件"):
+        downloader._fetch_download(Page(Response(ok=True, status=200, body=b"")), "u")
+
+
+@pytest.mark.parametrize(
+    ("disposition", "expected"),
+    (
+        ('attachment; filename="current_month.xls"', "current_month.xls"),
+        ("attachment; filename=orders.xlsx", "orders.xlsx"),
+        ("attachment; filename*=UTF-8''%E8%AE%A2%E5%8D%95.xls", "订单.xls"),
+        ("attachment", "export.xls"),
+        ("", "export.xls"),
+    ),
+)
+def test_suggested_filename(disposition, expected):
+    headers = {"content-disposition": disposition} if disposition else {}
+    assert downloader_module._suggested_filename(headers) == expected
+
+
+def test_download_center_refreshes_while_row_has_no_link(app_config, monkeypatch):
+    """行还没渲染出下载图标时刷新重试；这是 count==0 唯一剩下的含义。"""
+
+    class Link:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 0
+
+    class Row:
+        def inner_text(self):
+            return "maintainCompanyOrderPage\n成功\n2026-08-18 09:07\n4825\n10845"
+
+        def locator(self, selector):
+            return Link()
+
+    class Rows:
+        def filter(self, *, has_text):
+            return self
+
+        def count(self):
+            return 1
+
+        def nth(self, index):
+            return Row()
+
+    class Refresh:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 0
+
+        def wait_for(self, *, state, timeout):
+            raise TimeoutError("not visible")
+
+    refreshes = []
+
+    class FakePage:
+        def locator(self, selector):
+            return Rows() if selector == "tr" else Refresh()
+
+        def wait_for_timeout(self, milliseconds):
+            refreshes.append(milliseconds)
+
+    timeline = iter((0, 0, 0, 0, 0, 10_000))
+    monkeypatch.setattr(
+        "runbow007.downloader.time.monotonic", lambda: next(timeline, 10_000)
+    )
+    downloader = TmsDownloader(app_config)
+    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
+
+    with pytest.raises(TmsDownloadError, match="超时时间内未完成"):
+        downloader._download_from_center(FakePage(), datetime(2026, 8, 18, 9, 6), 4825)
+
+    assert refreshes, "应当持续刷新等待下载图标出现"
+
+
+def test_take_download_lets_the_hard_attempt_ceiling_through(app_config):
+    """单轮硬上限用 TmsDownloadError 抛出，兜底不得把它变成"再试一条路"。"""
+
+    class Link:
+        def evaluate(self, expression):
+            return "https://otb.lining.com/*.exportFileDowload?id=1"
+
+        def dispatch_event(self, event):
+            raise AssertionError("上限已到，不该再派发点击")
+
+    class Aborted:
+        def __enter__(self):
+            raise TmsDownloadError("单次尝试超过 900 秒硬上限，已强制中断")
+
+        def __exit__(self, *args):
+            return False
+
+    class Page:
+        context = SimpleNamespace(
+            request=SimpleNamespace(
+                get=lambda url: (_ for _ in ()).throw(AssertionError("不该走直取"))
+            )
+        )
+
+        def expect_download(self, *, timeout):
+            return Aborted()
+
+    with pytest.raises(TmsDownloadError, match="硬上限"):
+        TmsDownloader(app_config)._take_download(Page(), Link(), timeout_ms=1_000)

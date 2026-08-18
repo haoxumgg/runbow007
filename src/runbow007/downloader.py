@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
@@ -35,6 +36,38 @@ class DownloadResult:
     path: Path
     ui_total: int | None
     dataset: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectDownload:
+    """A raw HTTP response standing in for a Playwright download.
+
+    调用方只用到 ``suggested_filename`` 和 ``save_as``，所以直取这条兜底路径
+    不需要改动 ``_download_once`` 里保存文件的那几行。
+    """
+
+    suggested_filename: str
+    body: bytes
+
+    def save_as(self, target: str | Path) -> None:
+        Path(target).write_bytes(self.body)
+
+
+_FILENAME_PATTERNS = (
+    re.compile(r'''filename\*=(?:UTF-8'')?"?([^";]+)''', re.IGNORECASE),
+    re.compile(r'''filename="?([^";]+)''', re.IGNORECASE),
+)
+
+
+def _suggested_filename(headers: dict[str, str]) -> str:
+    disposition = headers.get("content-disposition", "")
+    for pattern in _FILENAME_PATTERNS:
+        match = pattern.search(disposition)
+        if match:
+            name = unquote(match.group(1).strip())
+            if name:
+                return name
+    return "export.xls"
 
 
 @dataclass(slots=True)
@@ -593,23 +626,18 @@ class TmsDownloader:
                 if "成功" not in text:
                     continue
                 link = row.locator("a:has(img[src*='excel'])").first
-                if not link.count() or not self._visible_now(link):
-                    # 之前这里是静默 continue，于是"任务明明成功却下不下来"完全
-                    # 看不见：2026-08-17 17:59 匹配到了 success=True 的任务，却
-                    # 一直空转到 18:08 超时。Element UI 的固定列会把 tbody 复制
-                    # 成多份，含任务名的行和含下载图标的行可能根本不是同一个 tr。
+                if not link.count():
+                    # 下载图标和任务名在同一个 <tr> 的第 8 列里（2026-08-18 从真实
+                    # DOM 确认，固定列副本只含第 1 列的复选框）。所以取不到只意味着
+                    # 这一行还没渲染完，刷新重试是有意义的。
                     if not link_missing_logged:
-                        logger.warning(
-                            "已匹配到成功的任务但找不到可见的下载链接，继续刷新重试"
-                        )
+                        logger.warning("任务行内暂无下载链接，刷新重试")
                         link_missing_logged = True
                     continue
                 if step is not None:
                     step.enter("下载 Excel 文件")
                 remaining = max(1, int(deadline - time.monotonic())) * 1_000
-                with page.expect_download(timeout=remaining) as info:
-                    link.click()
-                return info.value
+                return self._take_download(page, link, timeout_ms=remaining)
 
             self._click_first_visible_dom(page.locator("#refreshItem"))
             page.wait_for_timeout(2_000)
@@ -622,6 +650,65 @@ class TmsDownloader:
                 )
 
         raise TmsDownloadError("TMS 下载中心任务在超时时间内未完成")
+
+    def _take_download(self, page: object, link: object, *, timeout_ms: int) -> object:
+        """Take the export file without ever asking whether the icon is visible.
+
+        2026-08-18 全天每个整点都卡在这一步：任务两秒内就匹配上（状态成功、条数
+        一致），却连着 610 秒判不出"可见的下载链接"，超时后换新浏览器第二次必成，
+        每轮白烧 12 分钟。
+
+        实测四种不可见成因（display:none、visibility:hidden、宽高为 0、正常）：
+        只有可见性判定会失败，读属性和派发点击每一种都成功。而可见性恰恰是这里
+        唯一不需要的信息——行已经按时间窗和条数确认过了，目标就是它，不存在
+        "在多个候选里挑一个"的问题，所以直接派发点击，不做命中测试。
+        """
+        href = self._link_href(link)
+        if href:
+            logger.info("命中下载链接: %s", href)
+        try:
+            with page.expect_download(timeout=timeout_ms) as info:
+                link.dispatch_event("click")
+            return info.value
+        except TmsDownloadError:
+            # 单轮硬上限（SIGALRM）就是用这个类型抛的，兜底必须给它让路，
+            # 否则又会把"该中断了"变成"再试一条路"。
+            raise
+        except Exception:
+            if not href:
+                raise
+            logger.warning("点击未产生下载事件，改用链接直取", exc_info=True)
+        return self._fetch_download(page, href)
+
+    @staticmethod
+    def _link_href(link: object) -> str:
+        """Absolute URL of the download link, readable even when it is not visible.
+
+        DOM 的 ``.href`` 属性是浏览器 resolve 过的绝对地址；``getAttribute`` 只会
+        给出原样的 ``*.exportFileDowload?id=...``，拼不出能用的 URL。
+        """
+        try:
+            return str(link.evaluate("el => el.href") or "")
+        except Exception:  # pragma: no cover - 读不到就走点击那条路
+            logger.debug("读取下载链接地址失败", exc_info=True)
+            return ""
+
+    @staticmethod
+    def _fetch_download(page: object, href: str) -> _DirectDownload:
+        """Pull the file over the browser's own session as a last resort.
+
+        点击那条路要经过 iframe（链接是 ``target="view_frame"``）和 download 事件，
+        任何一环不响应都会重新卡住。同一个浏览器上下文发请求走的是同一套 cookie，
+        鉴权不受影响——链接里的 ``authorization=undefined`` 说明凭证本来就不在 URL 上。
+        """
+        response = page.context.request.get(href)
+        if not response.ok:
+            raise TmsDownloadError(f"下载链接直取失败: HTTP {response.status}")
+        body = response.body()
+        if not body:
+            raise TmsDownloadError("下载链接直取到空文件")
+        logger.info("下载链接直取成功: %s 字节", len(body))
+        return _DirectDownload(_suggested_filename(response.headers), body)
 
     @staticmethod
     def _parse_download_row(text: str) -> tuple[datetime | None, int | None]:
