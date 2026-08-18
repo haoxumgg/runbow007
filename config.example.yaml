@@ -51,7 +51,8 @@ tms:
     order_page_menu: "li.el-menu-item"
     # 步骤三 高级查找（注意是 #quickSearch，不是旁边那个放大镜 #searchItem）
     advanced_search_button: "#quickSearch"
-    preset_trigger: ".page-header-title.el-popover__reference"
+    # 只按结构定位；触发器上显示的文字是「上一次用过的预设」，是变量。
+    preset_trigger: ".page-header-title.el-popover__reference, span:has(> i.show-search-list)"
     preset_item: ".search-list .search-item"
     query_button: "button.thorn6-primary-button"
     total_count: "button.pagination-total"

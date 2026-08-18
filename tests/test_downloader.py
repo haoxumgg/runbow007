@@ -580,13 +580,36 @@ def test_open_order_page_ignores_the_parent_menu_of_the_same_name(app_config, cl
 # ---------------------------------------------------------------------------
 
 
-def _filter_page(app_config, presets=("电子签（11）", "AI导出数据（勿动）", "上海正向", "正向")):
+def _preset_widget(presets, *, showing, list_open=False):
+    """真实控件的行为：触发器显示「上一次用过的预设」，点它才展开列表，
+    点中某一项之后触发器的文字才会变成那一项。"""
+    trigger = FakeElement(showing)
+    items = [FakeElement(name, visible=list_open) for name in presets]
+
+    def open_list():
+        for item in items:
+            item.visible = True
+
+    trigger.on_click = open_list
+    for item in items:
+        item.on_click = lambda chosen=item: setattr(trigger, "text", chosen.text)
+    return trigger, items
+
+
+def _filter_page(
+    app_config,
+    presets=("电子签（11）", "AI导出数据（勿动）", "上海正向", "正向"),
+    *,
+    showing="浙江离场",
+    list_open=False,
+):
     selectors = app_config.tms.selectors
+    trigger, items = _preset_widget(presets, showing=showing, list_open=list_open)
     return FakePage(
         css={
             selectors.advanced_search_button: FakeElement("高级查找"),
-            selectors.preset_trigger: FakeElement("AI导出数据（勿动）"),
-            selectors.preset_item: [FakeElement(name) for name in presets],
+            selectors.preset_trigger: trigger,
+            selectors.preset_item: items,
             selectors.query_button: [FakeElement("查询"), FakeElement("保存")],
         },
         role={"查询": []},
@@ -636,6 +659,69 @@ def test_preset_choice_tolerates_whitespace_in_the_label(app_config, clock):
     TmsDownloader(app_config)._apply_preset(page, "current_month")
 
     assert page.css[selectors.preset_item][1].clicks == ["real"]
+
+
+def test_preset_trigger_is_located_without_reading_its_text(app_config, clock):
+    """触发器显示的是「上一次用过的预设」，谁切过就变成谁的，绝不能拿它定位。"""
+    selectors = app_config.tms.selectors
+    page = _filter_page(app_config, showing="随便哪个别人选过的视图")
+
+    TmsDownloader(app_config)._apply_preset(page, "current_month")
+
+    assert page.css[selectors.preset_trigger].clicks == ["real"]
+    chosen = [item.text for item in page.css[selectors.preset_item] if item.clicks]
+    assert chosen == ["AI导出数据（勿动）"]
+
+
+def test_preset_list_already_open_is_not_clicked_shut(app_config, clock):
+    """下拉已经开着时再点触发器，会把它关掉——旧代码就是这样一个都没选中。"""
+    selectors = app_config.tms.selectors
+    page = _filter_page(app_config, list_open=True)
+
+    TmsDownloader(app_config)._apply_preset(page, "current_month")
+
+    assert page.css[selectors.preset_trigger].clicks == []
+    chosen = [item.text for item in page.css[selectors.preset_item] if item.clicks]
+    assert chosen == ["AI导出数据（勿动）"]
+
+
+def test_hidden_popover_copies_are_skipped(app_config, clock):
+    """Element UI 会在 DOM 里留下隐藏的 popover 副本，点它等于什么都没点。"""
+    selectors = app_config.tms.selectors
+    page = _filter_page(app_config)
+    ghost = FakeElement("AI导出数据（勿动）", visible=False)
+    # 换一个新列表，展开下拉时不会顺带把这份隐藏副本也点亮。
+    page.css[selectors.preset_item] = [ghost, *page.css[selectors.preset_item]]
+
+    TmsDownloader(app_config)._apply_preset(page, "current_month")
+
+    assert ghost.clicks == []
+    assert page.css[selectors.preset_item][2].clicks == ["real"]
+
+
+def test_preset_that_did_not_take_effect_aborts_the_round(app_config, clock):
+    """2026-08-17 那轮就是没选中却一路跑到底，带着 12644 行的错误视图发了飞书。"""
+    selectors = app_config.tms.selectors
+    page = _filter_page(app_config, showing="浙江离场")
+    for item in page.css[selectors.preset_item]:
+        item.on_click = None  # 点了没反应，标题还是别人的那个
+
+    with pytest.raises(TmsDownloadError, match="标题仍然是「浙江离场」"):
+        TmsDownloader(app_config)._apply_preset(page, "current_month")
+
+    assert page.css[selectors.query_button][0].clicks == []
+
+
+def test_unreadable_preset_title_does_not_invent_a_failure(app_config, clock):
+    selectors = app_config.tms.selectors
+    page = _filter_page(app_config)
+    trigger = page.css[selectors.preset_trigger]
+    original = trigger.on_click
+    trigger.on_click = lambda: (original(), setattr(trigger, "visible", False))
+
+    TmsDownloader(app_config)._apply_preset(page, "current_month")
+
+    assert page.css[selectors.query_button][0].clicks == ["real"]
 
 
 def test_missing_preset_lists_what_the_dropdown_actually_offers(app_config, clock):
@@ -974,6 +1060,10 @@ def _full_page(app_config):
     signed_in = FakeElement("下载中心", visible=False)
     username = FakeElement()
     group = FakeElement("集团订单管理", visible=False)
+    # 触发器上留着别人上一次用的预设，本轮必须显式切回来。
+    preset_trigger, preset_items = _preset_widget(
+        ("电子签（11）", "AI导出数据（勿动）"), showing="浙江离场"
+    )
 
     page = FakePage(
         css={
@@ -989,11 +1079,8 @@ def _full_page(app_config):
             ),
             selectors.order_page_menu: group,
             selectors.advanced_search_button: FakeElement("高级查找"),
-            selectors.preset_trigger: FakeElement("AI导出数据（勿动）"),
-            selectors.preset_item: [
-                FakeElement("电子签（11）"),
-                FakeElement("AI导出数据（勿动）"),
-            ],
+            selectors.preset_trigger: preset_trigger,
+            selectors.preset_item: preset_items,
             selectors.query_button: [FakeElement("查询"), FakeElement("保存")],
             ".el-loading-mask": FakeElement(visible=False),
             selectors.total_count: FakeElement("共 4910 条"),
@@ -1053,6 +1140,7 @@ def test_download_once_walks_all_four_documented_steps(app_config, clock, monkey
     assert page.css[selectors.order_page_menu].clicks == ["real"]
     assert page.css[selectors.advanced_search_button].clicks == ["real"]
     assert page.css[selectors.preset_item][1].clicks == ["real"]
+    assert page.css[selectors.preset_trigger].text == "AI导出数据（勿动）"
     assert page.css[selectors.query_button][0].clicks == ["real"]
     assert page.css[selectors.query_button][1].clicks == []
     assert page.css[selectors.export_button].clicks == ["real"]

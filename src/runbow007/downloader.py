@@ -431,11 +431,9 @@ class TmsDownloader:
         if preset:
             # 预设是账号级共享且粘性的：默认选中的永远是「上一次用过的那个」，别人
             # 在浏览器里切过，我们下一轮就会继承。所以每轮都必须显式选回来。
-            self._click(
-                self._wait_visible(page, selectors.preset_trigger, "预设模板选择"),
-                "预设模板选择",
-            )
+            self._open_preset_list(page)
             self._choose_preset(page, preset)
+            self._confirm_preset_applied(page, preset)
         else:
             logger.warning("未配置预设名称，直接使用页面当前的查询条件")
         # 只点「查询」，绝不点「保存」：预设里的日期条件由人工维护，程序改了会影响
@@ -452,12 +450,29 @@ class TmsDownloader:
             "查询",
         )
 
+    def _open_preset_list(self, page: object) -> None:
+        """点开预设下拉。触发器只按结构定位，绝不按它显示的文字。
+
+        触发器显示的是「上一次用过的预设」——谁在这个账号上切过就变成谁的那个，
+        所以它的文本是个变量，拿它做定位依据必然出错。这里只认两样结构特征：
+        el-popover 的 reference 类名，以及里面那个 .show-search-list 箭头图标。
+
+        下拉已经开着时不要再点触发器——那一下会把它关掉。
+        """
+        selectors = self.config.tms.selectors
+        items = page.locator(selectors.preset_item)
+        if self._first_visible(items, timeout_ms=self._QUICK_PROBE_MS) is not None:
+            return
+        trigger = self._wait_visible(page, selectors.preset_trigger, "预设模板选择")
+        self._click(trigger, "预设模板选择")
+        self._wait_visible_any(page, [items], "预设下拉列表", seconds=15)
+
     def _choose_preset(self, page: object, preset: str) -> None:
         """在下拉框里选中指定预设，按整词匹配。
 
-        列表里有「正向」和「上海正向」这种互为子串的名字，子串匹配会选错；而当前
-        选中的预设名同时也显示在触发器上，按文本全局找又会点回触发器、把下拉收起来。
-        所以只在 .search-item 里逐项比对。
+        只在可见的 .search-item 里逐项比对：列表里有「正向」和「上海正向」这种互为
+        子串的名字，子串匹配会选错；Element UI 的 popover 又可能在 DOM 里留下隐藏
+        副本，读到隐藏那份就会点了个点不着的元素。
         """
         wanted = self._normalize(preset)
         items = page.locator(self.config.tms.selectors.preset_item)
@@ -471,6 +486,8 @@ class TmsDownloader:
                 total = 0
             for index in range(total):
                 item = items.nth(index)
+                if not self._visible_now(item, timeout_ms=self._QUICK_PROBE_MS):
+                    continue
                 text = self._safe_text(item)
                 if not text:
                     continue
@@ -481,6 +498,36 @@ class TmsDownloader:
             page.wait_for_timeout(250)
         available = "、".join(labels[:30]) if labels else "（没读到任何选项）"
         raise TmsDownloadError(f"高级查找里没有预设「{preset}」，当前可选: {available}")
+
+    def _confirm_preset_applied(self, page: object, preset: str) -> None:
+        """选完回读触发器，确认它确实变成了目标预设。
+
+        这里读文字是「事后核对」，不是「按文字定位」——正因为触发器显示的就是当前
+        生效的那个预设，它是唯一能证明这一下真的选中了的信号。
+
+        必须有这道检查：2026-08-17 17:54 那轮就是没选中却一路跑到底，带着继承来的
+        12644 行视图（正常 4750）导出、算规则、发飞书，全程没有任何一处报错。
+        """
+        wanted = self._normalize(preset)
+        trigger = page.locator(self.config.tms.selectors.preset_trigger)
+        deadline = time.monotonic() + 10
+        current = ""
+        while time.monotonic() < deadline:
+            visible = self._first_visible(trigger, timeout_ms=self._QUICK_PROBE_MS)
+            if visible is not None:
+                current = self._safe_text(visible)
+                if self._normalize(current) == wanted:
+                    logger.info("预设已切换到「%s」", preset)
+                    return
+            page.wait_for_timeout(250)
+        if not current:
+            # 读不到就别凭空造一个失败点，后面还有行数合理性检查兜着。
+            logger.warning("读不到预设标题，跳过核对，继续查询")
+            return
+        raise TmsDownloadError(
+            f"预设没有切换成功：标题仍然是「{current}」，期望「{preset}」。"
+            "继续下去会导出别人留下的视图，本次中止。"
+        )
 
     def _wait_for_grid(self, page: object) -> int | None:
         """等「拼命加载中」遮罩散掉，并尽力读出左下角的「共 N 条」。

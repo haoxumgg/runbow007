@@ -40,7 +40,11 @@ class TmsSelectors:
     order_page_menu: str = "li.el-menu-item"
     # 步骤三 高级查找 → 预设 → 查询 → 导出
     advanced_search_button: str = "#quickSearch"
-    preset_trigger: str = ".page-header-title.el-popover__reference"
+    # 只按结构定位：popover 的 reference 类名，或里面那个下拉箭头图标。
+    # 触发器显示的文字是「上一次用过的预设」，是变量，不能拿来定位。
+    preset_trigger: str = (
+        ".page-header-title.el-popover__reference, span:has(> i.show-search-list)"
+    )
     preset_item: str = ".search-list .search-item"
     query_button: str = "button.thorn6-primary-button"
     total_count: str = "button.pagination-total"
