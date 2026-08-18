@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -188,3 +189,30 @@ def test_actions_deploy_can_bootstrap_docker_on_ubuntu_2404():
     assert "/etc/apt/sources.list.d/docker.sources" in remote_script
     assert "docker-buildx-plugin docker-compose-plugin" in remote_script
 
+
+
+def test_browser_layer_precedes_source_and_pins_the_same_playwright():
+    """浏览器安装必须排在 COPY src 之前，否则改一行代码就要重下 114 MB。
+
+    2026-08-18 两次部署都因此撞穿 75 分钟超时：服务器到 cdn.playwright.dev
+    掉到约 107 KB/s，而每次提交都让浏览器层失效。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    # 只看指令行：注释里也会提到这两个词
+    steps = [
+        line
+        for line in dockerfile.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    install_browsers = next(i for i, line in enumerate(steps) if "playwright install" in line)
+    copy_source = next(i for i, line in enumerate(steps) if line.startswith("COPY src"))
+    assert install_browsers < copy_source, "浏览器层必须在 COPY src 之前"
+
+    pinned = re.search(r'"playwright==([\d.]+)"', dockerfile)
+    assert pinned, "Dockerfile 必须钉住 playwright 版本"
+    assert f'"playwright=={pinned.group(1)}"' in pyproject, (
+        "Dockerfile 和 pyproject.toml 的 playwright 版本必须一致，"
+        "否则 pip install . 会换掉库，浏览器就和它对不上"
+    )
