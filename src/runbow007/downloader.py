@@ -355,14 +355,35 @@ class TmsDownloader:
         if preset:
             # 视图状态是账号级共享且粘性的——默认视图就是"上一次操作的视图"，别人
             # 切过视图下一轮就会继承。每轮都必须显式选回预设。
-            page.locator(selectors.preset_name).first.click()
+            #
+            # 先等对话框真的开出来再点里面的东西。2026-08-19 00:11 那次失败就是没等：
+            # 点开高级筛选后立刻去点预设入口，而当时选择器还带着一个不限定对话框的
+            # 兜底分支，从下载中心切回来时 .first 按 DOM 顺序选中了另一个元素，点了
+            # 等于没点，然后白等满 30 秒才报"找不到预设视图"。
+            trigger = page.locator(selectors.preset_name).first
+            if not self._visible(trigger, self._ELEMENT_WAIT_MS):
+                raise TmsDownloadError("点击高级筛选后未打开筛选对话框")
+            trigger.click()
             option = page.locator(selectors.preset_option).filter(has_text=preset).first
             if not self._visible(option, self._ELEMENT_WAIT_MS):
-                raise TmsDownloadError(f"高级筛选里没有找到预设视图: {preset}")
+                # 把当时能看到的预设列出来，下次失败就不用再猜是"没展开"还是"名字对不上"。
+                raise TmsDownloadError(
+                    f"高级筛选里没有找到预设视图: {preset}；"
+                    f"当前可见预设: {self._visible_presets(page)}"
+                )
             option.click()
             page.wait_for_timeout(500)
         # 日期不再填：预设自身已经带了日期范围，重复填写只是多一个会出错的操作。
         page.locator(selectors.query_button).first.click()
+
+    def _visible_presets(self, page: object) -> list[str]:
+        """Names of the preset views actually on screen, for failure messages."""
+        try:
+            return page.locator(self.config.tms.selectors.preset_option).evaluate_all(
+                "nodes => nodes.map(node => node.innerText.trim()).slice(0, 20)"
+            )
+        except Exception:
+            return []
 
     def _wait_for_orders(self, page: object) -> int | None:
         """Wait out the loading mask and refuse to export against an empty grid.

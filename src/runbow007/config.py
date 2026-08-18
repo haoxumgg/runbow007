@@ -42,7 +42,9 @@ class TmsSelectors:
     order_menu: str = '.el-submenu__title:has-text("订单管理"):visible'
     group_order_menu: str = 'li.el-menu-item:has-text("集团订单管理"):visible'
     advanced_filter_button: str = "#searchItem:visible"
-    preset_name: str = ".el-dialog:visible .page-header-title, .page-header-title:visible"
+    # 只认对话框里的那一个。加不限定对话框的兜底分支会引入歧义：locator("A, B").first
+    # 取的是 DOM 顺序而不是分支顺序，从下载中心切回来时会选中错误的元素。
+    preset_name: str = ".el-dialog:visible .page-header-title"
     preset_option: str = ".search-list .search-item:visible"
     query_button: str = ".el-dialog:visible button.el-button--primary"
     total_count: str = "button.pagination-total:visible"

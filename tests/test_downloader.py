@@ -115,8 +115,10 @@ class _Locator:
         return _Locator([item for item in self._elements if has_text in item.text])
 
     def evaluate_all(self, expression):
-        assert "getAttribute('href')" in expression
-        return [item.href for item in self._elements]
+        if "getAttribute('href')" in expression:
+            return [item.href for item in self._elements]
+        assert "innerText" in expression
+        return [item.text.strip() for item in self._elements]
 
 
 class _Page:
@@ -555,19 +557,44 @@ def test_apply_filters_selects_the_preset_view(app_config):
     assert (trigger.clicks, wanted.clicks, other.clicks, query.clicks) == (1, 1, 0, 1)
 
 
-def test_apply_filters_fails_when_the_preset_is_gone(app_config):
+def test_apply_filters_names_the_presets_it_could_see(app_config):
+    """失败信息要能区分"对话框没展开"和"预设改名了"，否则下次还得猜。"""
     selectors = app_config.tms.selectors
     page = _Page(
         {
             selectors.advanced_filter_button: [_Element()],
             selectors.preset_name: [_Element()],
-            selectors.preset_option: [_Element(text="上周发运")],
+            selectors.preset_option: [_Element(text="上周发运"), _Element(text="本月全量")],
             selectors.query_button: [_Element()],
         }
     )
 
-    with pytest.raises(TmsDownloadError, match="没有找到预设视图: AI导出数据（勿动）"):
+    with pytest.raises(TmsDownloadError) as excinfo:
         TmsDownloader(app_config)._apply_filters(page, "current_month")
+
+    message = str(excinfo.value)
+    assert "没有找到预设视图: AI导出数据（勿动）" in message
+    assert "上周发运" in message and "本月全量" in message
+
+
+def test_apply_filters_fails_when_the_dialog_never_opens(app_config):
+    """点了高级筛选但对话框没开：此前会去点到 DOM 里另一个同类元素，白等 30 秒。"""
+    selectors = app_config.tms.selectors
+    trigger = _Element(visible=False)
+    option = _Element(text="AI导出数据（勿动）")
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element()],
+            selectors.preset_name: [trigger],
+            selectors.preset_option: [option],
+            selectors.query_button: [_Element()],
+        }
+    )
+
+    with pytest.raises(TmsDownloadError, match="未打开筛选对话框"):
+        TmsDownloader(app_config)._apply_filters(page, "current_month")
+
+    assert option.clicks == 0
 
 
 # ------------------------------------------------------------ download centre

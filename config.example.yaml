@@ -42,7 +42,9 @@ tms:
     order_menu: '.el-submenu__title:has-text("订单管理"):visible'
     group_order_menu: 'li.el-menu-item:has-text("集团订单管理"):visible'
     advanced_filter_button: "#searchItem:visible"
-    preset_name: ".el-dialog:visible .page-header-title, .page-header-title:visible"
+    # 只认对话框里的那一个：locator("A, B").first 取 DOM 顺序而非分支顺序，
+    # 加兜底分支会在从下载中心切回来时选错元素。
+    preset_name: ".el-dialog:visible .page-header-title"
     preset_option: ".search-list .search-item:visible"
     query_button: ".el-dialog:visible button.el-button--primary"
     # 页面总数会与 Excel 唯一订单数强校验。
