@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -188,3 +189,39 @@ def test_actions_deploy_can_bootstrap_docker_on_ubuntu_2404():
     assert "/etc/apt/sources.list.d/docker.sources" in remote_script
     assert "docker-buildx-plugin docker-compose-plugin" in remote_script
 
+
+
+def test_dockerfile_installs_browsers_before_copying_source():
+    """浏览器层必须在源码之前，否则改一行代码就要重下约 300MB。
+
+    2026-08-18 的四次部署都因此卡在 Google CDN 上，其中一次重试了 68 分钟，
+    最后被工作流的 75 分钟上限打死。层序反了不会有任何报错，只会变慢和不稳定，
+    所以用测试钉住。
+    """
+    # 只看指令行——注释里也写着这两个字样，按整文件搜会匹配到说明文字。
+    instructions = [
+        line
+        for line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    browsers = next(i for i, line in enumerate(instructions) if "playwright install" in line)
+    source = next(i for i, line in enumerate(instructions) if line.startswith("COPY src"))
+
+    assert browsers < source, "playwright install 必须排在 COPY src 之前"
+
+
+def test_dockerfile_pins_the_same_playwright_as_the_project():
+    """浏览器按版本号存放：Dockerfile 先装的版本一旦和 pyproject 解析出的不一致，
+
+    pip install . 会把 playwright 升级掉，而运行时才会报"可执行文件不存在"。
+    构建期那条断言负责拦住它，这里确保两处版本本来就是一致的。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    pinned = re.search(r"ARG PLAYWRIGHT_VERSION=([\d.]+)", dockerfile)
+    required = re.search(r'"playwright==([\d.]+)"', pyproject)
+
+    assert pinned and required, "两边都必须精确锁定 playwright 版本"
+    assert pinned.group(1) == required.group(1)
+    assert "assert v == '${PLAYWRIGHT_VERSION}'" in dockerfile, "构建期需要校验版本一致"
