@@ -45,7 +45,29 @@ chmod +x \
   scripts/deploy-alinux3.sh
 
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
-docker compose --project-directory "$project_root" build app
+
+# 构建必须有上限。缓存命中时这一步是秒级，需要重新下载 Playwright 浏览器时才会
+# 变长——而这台服务器到 cdn.playwright.dev 的吞吐随时段剧烈波动：2026-08-18
+# 15:53 全部下完只用了 165 秒，同日 18:00 起实测只有约 0.1 MB/s，300MB 根本不可能
+# 在部署窗口内下完。没有上限的话，这种时候构建会一直磨到 GitHub 那边 75 分钟的
+# 作业上限才被打断，当天为此白烧了五次部署，而且日志要等作业结束才能下载，
+# 期间完全看不出发生了什么。
+# 25 分钟远高于健康构建的耗时，触发它就说明网络已经不具备完成下载的条件，
+# 此时立刻失败并说清楚原因，比磨满 75 分钟有用得多。
+build_timeout_seconds="${RUNBOW007_BUILD_TIMEOUT_SECONDS:-1500}"
+# 用 `|| status=$?` 而不是 `if ! cmd`：后者在 then 分支里读到的 $? 是取反之后的
+# 结果，拿不到 timeout 用来表示"超时"的 124。
+build_status=0
+timeout "$build_timeout_seconds" \
+  docker compose --project-directory "$project_root" build app || build_status=$?
+if [[ "$build_status" -ne 0 ]]; then
+  if [[ "$build_status" -eq 124 ]]; then
+    echo "镜像构建超过 ${build_timeout_seconds} 秒仍未完成。" >&2
+    echo "常见原因是需要重新下载 Playwright 浏览器，而当前到 CDN 的带宽过低；" >&2
+    echo "可稍后重试，或改用镜像源/预构建镜像。" >&2
+  fi
+  exit "$build_status"
+fi
 
 # buildx 的构建缓存从不自动回收：镜像本身只有约 1.9GB，但每次构建都会把
 # Playwright 的 chromium(184MB)、headless shell(115MB)、ffmpeg 和 apt 依赖

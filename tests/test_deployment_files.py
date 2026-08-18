@@ -225,3 +225,18 @@ def test_dockerfile_pins_the_same_playwright_as_the_project():
     assert pinned and required, "两边都必须精确锁定 playwright 版本"
     assert pinned.group(1) == required.group(1)
     assert "assert v == '${PLAYWRIGHT_VERSION}'" in dockerfile, "构建期需要校验版本一致"
+
+
+def test_deploy_bounds_the_image_build():
+    """构建必须有上限，否则拉不动浏览器时会一直磨到 GitHub 的 75 分钟作业上限。
+
+    2026-08-18 为此白烧了五次部署，而作业日志要等结束才能下载，期间完全看不出
+    发生了什么。超时要能被识别（timeout 用 124 表示），并说清原因。
+    """
+    script = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+
+    assert "timeout \"$build_timeout_seconds\"" in script
+    assert "build_status=$?" in script, "必须用 `|| status=$?` 取真实退出码"
+    assert "-eq 124" in script, "需要把超时和普通构建失败区分开"
+    # `if ! cmd` 会让 then 分支里的 $? 变成取反后的值，读不到 124。
+    assert "if ! timeout" not in script
