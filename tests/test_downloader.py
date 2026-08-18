@@ -831,6 +831,9 @@ def test_download_once_snapshots_the_baseline_before_exporting(app_config, monke
 
     # 快照必须在点导出之前，之后"id 更大"才等于"本轮新建的"。
     assert order == ["open-center", "snapshot", "order-page", "filter", "export", "await"]
+    # 逛完下载中心后 DOM 里堆着多份菜单副本，菜单导航会在上面失败；重新加载首页
+    # 换回确定的起点。首次 goto 之外，快照后必须再来一次。
+    assert page.gotos == [app_config.tms.url, app_config.tms.url]
     assert state.baseline_id == 34920
     assert state.expected_total == 4753
     assert state.task_created is True

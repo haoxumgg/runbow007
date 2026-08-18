@@ -218,6 +218,14 @@ class TmsDownloader:
                         len(links),
                         state.baseline_id,
                     )
+                    # 逛完下载中心之后 DOM 就不再干净：TMS 把打开过的页面全留着，
+                    # 菜单和工具栏会出现多份副本，接下来的菜单导航实测连续两轮都在
+                    # 第一次尝试上失败——2026-08-19 00:11 卡在选预设、00:23 卡在等
+                    # 高级筛选按钮，而跳过下载中心的那次重试两轮都一次就过。
+                    # 与其继续在这片流沙上调选择器，不如重新加载首页，用几秒钟换回
+                    # 一个确定的起点（跟"每轮全新浏览器"是同一条原则）。
+                    page.goto(self.config.tms.url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(2_000)
 
                 if state.task_created:
                     logger.info("前次已创建导出任务，直接回下载中心取文件")
