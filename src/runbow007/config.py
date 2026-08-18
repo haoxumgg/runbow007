@@ -26,26 +26,34 @@ class RuntimeConfig:
 
 @dataclass(slots=True)
 class TmsSelectors:
+    """按《在TMS系统上下载数据》里抓的真实 DOM 校准，顺序与操作步骤一致。"""
+
+    # 步骤一 登录
     username: str = (
-        "input[name='username'], input[placeholder*='账号'], "
-        "input[placeholder*='用户名']"
+        "input[placeholder*='用户名'], input[placeholder*='账号'], "
+        "input[name='username']"
     )
     password: str = "input[type='password']"
-    login_button: str = ".submit-btn"
-    advanced_filter_button: str = "#searchItem"
-    preset_name: str = ".el-dialog:visible .page-header-title"
-    date_from_input: str = ".el-dialog:visible .el-date-editor input"
-    query_button: str = ".el-dialog:visible button.el-button--primary"
+    login_button: str = "button.submit-btn"
+    # 步骤二 订单管理 → 集团订单管理。父子两级都叫「订单管理」，靠这两个容器区分。
+    order_menu: str = ".el-submenu__title"
+    order_page_menu: str = "li.el-menu-item"
+    # 步骤三 高级查找 → 预设 → 查询 → 导出
+    advanced_search_button: str = "#quickSearch"
+    preset_trigger: str = ".page-header-title.el-popover__reference"
+    preset_item: str = ".search-list .search-item"
+    query_button: str = "button.thorn6-primary-button"
     total_count: str = "button.pagination-total"
-    download_button: str = (
-        "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
-    )
-    download_center_menu: str = "ul.right_menu li.menu-item:has(.thorn6-icon-xiazai)"
+    export_button: str = "button.round-btn:has(.thorn6-icon-daoru)"
+    # 步骤四 下载中心
+    download_center_menu: str = "li.menu-item:has(.thorn6-icon-xiazai)"
+    download_center_refresh: str = "#refreshItem"
+    download_link: str = "a[href*='exportFileDowload']"
 
 
 @dataclass(slots=True)
 class TmsConfig:
-    url: str = "https://otb.lining.com/#/"
+    url: str = "https://otb.lining.com/#/login"
     username: str = ""
     headless: bool = True
     persistent_profile: bool = False
@@ -55,6 +63,9 @@ class TmsConfig:
     attempt_timeout_seconds: int = 900
     export_task_appear_minutes: int = 8
     total_tolerance: int = 10
+    # 下载中心「功能」列的匹配关键字。用截断后仍然保留的前缀，避免 Element UI
+    # 的省略号影响匹配。
+    export_task_keyword: str = "maintainCompanyOrd"
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
     selectors: TmsSelectors = field(default_factory=TmsSelectors)
@@ -160,6 +171,8 @@ class AppConfig:
             raise ConfigError("tms.total_tolerance 必须在 0 到 1000 之间")
         if not 1 <= self.tms.export_task_appear_minutes <= 30:
             raise ConfigError("tms.export_task_appear_minutes 必须在 1 到 30 之间")
+        if not self.tms.export_task_keyword.strip():
+            raise ConfigError("tms.export_task_keyword 不能为空")
         if not 10 <= self.tms.grid_load_timeout_seconds <= 900:
             raise ConfigError("tms.grid_load_timeout_seconds 必须在 10 到 900 之间")
         if self.tms.attempt_timeout_seconds and not (

@@ -9,7 +9,8 @@ runtime:
   retain_days: 30
 
 tms:
-  url: https://otb.lining.com/#/
+  # 文档里的登录地址。全新浏览器每轮都要重新登录，直接落在登录页最确定。
+  url: https://otb.lining.com/#/login
   # 只写账号。Windows 使用凭据管理器；Linux 使用 RUNBOW007_TMS_PASSWORD。
   username: ""
   headless: true
@@ -18,7 +19,7 @@ tms:
   # 结果每轮的页面结构都不一样。改成 true 可退回旧行为（例如频繁登录触发风控时）。
   persistent_profile: false
   navigation_timeout_seconds: 45
-  # 实测 4672 单导出约 2–3 分钟即可完成。等待 10 分钟足够，且能保证三次重试
+  # 实测 4900 单导出约 2–3 分钟即可完成。等待 10 分钟足够，且能保证三次重试
   # （0/60/180 秒退避）全部落在一小时的调度间隔内，不会吃掉下一个整点。
   download_timeout_seconds: 600
   # 点查询后等「拼命加载中」遮罩消失、表格出数据的上限。数据量大时会很慢。
@@ -30,25 +31,35 @@ tms:
   # 正常 1–2 分钟就会出现；高峰期会更慢。这个值 × 3 次尝试要留在 50 分钟的单轮
   # 预算内，8 分钟是保持三次重试的上限。
   export_task_appear_minutes: 8
-  # 读取页面总数到 TMS 生成导出之间订单还在增减，允许的条数漂移。
+  # 页面「共 N 条」与 Excel 唯一订单数比对时允许的漂移（读得到总数时才生效）。
   total_tolerance: 10
+  # 下载中心「功能」列的匹配关键字，用截断后仍然保留的前缀。
+  export_task_keyword: maintainCompanyOrd
+  # 高级查找里要选中的预设。程序只选中并点「查询」，绝不点「保存」，
+  # 预设里的日期条件（大于等于当月 1 号）由人工在 TMS 上维护。
   current_month_preset: AI导出数据（勿动）
   # 李宁 TMS 中配置好历史未完结查询后再填写。
   open_carryover_preset: ""
+  # 以下选择器全部按《在TMS系统上下载数据》里抓的真实 DOM 校准，顺序即操作顺序。
   selectors:
-    username: "input[name='username'], input[placeholder*='账号'], input[placeholder*='用户名']"
+    # 步骤一 登录
+    username: "input[placeholder*='用户名'], input[placeholder*='账号'], input[name='username']"
     password: "input[type='password']"
-    # 以下选择器已按 hdrunbow 账号的真实页面校准。
-    login_button: ".submit-btn"
-    advanced_filter_button: "#searchItem"
-    preset_name: ".el-dialog:visible .page-header-title"
-    date_from_input: ".el-dialog:visible .el-date-editor input"
-    query_button: ".el-dialog:visible button.el-button--primary"
-    # 页面总数会与 Excel 唯一订单数强校验。
+    login_button: "button.submit-btn"
+    # 步骤二 订单管理 → 集团订单管理。父子两级都叫「订单管理」，靠容器区分。
+    order_menu: ".el-submenu__title"
+    order_page_menu: "li.el-menu-item"
+    # 步骤三 高级查找（注意是 #quickSearch，不是旁边那个放大镜 #searchItem）
+    advanced_search_button: "#quickSearch"
+    preset_trigger: ".page-header-title.el-popover__reference"
+    preset_item: ".search-list .search-item"
+    query_button: "button.thorn6-primary-button"
     total_count: "button.pagination-total"
-    download_button: "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
-    # 右上角全局菜单里的「下载中心」。图标类名唯一且稳定，比文本匹配可靠。
-    download_center_menu: "ul.right_menu li.menu-item:has(.thorn6-icon-xiazai)"
+    export_button: "button.round-btn:has(.thorn6-icon-daoru)"
+    # 步骤四 下载中心。图标类名唯一且稳定，比文本匹配可靠。
+    download_center_menu: "li.menu-item:has(.thorn6-icon-xiazai)"
+    download_center_refresh: "#refreshItem"
+    download_link: "a[href*='exportFileDowload']"
 
 feishu:
   # 自建应用 App ID。Linux 通过 RUNBOW007_FEISHU_APP_SECRET 提供密钥。

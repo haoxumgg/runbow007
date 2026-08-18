@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- 使用 Playwright 登录李宁 TMS、进入集团订单管理、应用保存筛选、创建导出任务并从下载中心取得完整 Excel；
+- 使用 Playwright 按《在TMS系统上下载数据》的四个步骤驱动李宁 TMS：登录 → 集团订单管理 → 高级查找选预设并导出 → 下载中心取件；
 - 读取 `.xls` 和 `.xlsx`，验证必要表头、订单号唯一性以及页面总数；
 - 实现四类提醒：WMS过账时效、今日实际到达、合同签署异常、延迟无原因；
 - SQLite 保存订单、运行批次、异常事件和飞书发送记录；
@@ -56,7 +56,7 @@ Set-ExecutionPolicy -Scope Process Bypass
    - 填写飞书自建应用 `app_id`；
    - 保留已确认群 ID `oc_f79000009c4f09cbdf78b55fd35ae04a`；
    - `mention_user_id` 可留空，只发送普通群消息；需要真正 @ 时再填写飞书 `open_id` 或 `user_id`；
-   - 首次联调时校准 TMS 页面选择器。
+   - 页面选择器已按真实 DOM 校准，正常不用改。
 2. Windows 将密码保存到凭据管理器：
 
 ```powershell
@@ -91,14 +91,48 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\runbow007.exe --config config.yaml run --rules R2
 ```
 
-`TmsDownloader` 优先按中文语义定位按钮，CSS 选择器可以在配置中覆盖。李宁系统的导出是后台任务，程序会自动确认导出、轮询下载中心并取得成功文件。首次拿到账号后需要用有界面模式校准一次：
+`TmsDownloader` 严格按下面的操作流程走，CSS 选择器可以在配置中覆盖。李宁系统的导出是后台任务，程序会自动确认导出、轮询下载中心并取得成功文件。需要肉眼确认某一步时用有界面模式跑一次：
 
 ```yaml
 tms:
   headless: false
 ```
 
-确认稳定后再恢复 `true`。
+确认后再恢复 `true`。
+
+## TMS 操作流程
+
+程序完全照搬人工操作，每一步都只操作**可见**的那个元素——TMS 是标签页式 SPA，打开过的页面全部留在 DOM 里，隐藏副本和真正在用的元素长得一模一样。
+
+| 步骤 | 操作 | 定位方式 |
+| --- | --- | --- |
+| 一、登录 | 打开 `https://otb.lining.com/#/login`，填用户名密码，点「登录」 | `input[placeholder*='用户名']` / `input[type='password']` / `button.submit-btn` |
+| 二、进入订单页 | 点左侧「订单管理」展开，再点「集团订单管理」 | 父级只在 `.el-submenu__title` 里按整词找，子级只在 `li.el-menu-item` 里按整词找（两级同名） |
+| 三、筛选并导出 | 点「高级查找」→ 点预设模板选择 → 选「AI导出数据（勿动）」→ 点「查询」→ 点「导出」→ 点「确定」 | `#quickSearch` → `.page-header-title.el-popover__reference` → `.search-list .search-item` → `button.thorn6-primary-button` → `button.round-btn:has(.thorn6-icon-daoru)` → 角色按钮「确定」 |
+| 四、下载中心 | 点右上角「下载中心」，找到本轮那一行，点 Excel 图标 | `li.menu-item:has(.thorn6-icon-xiazai)` → `a[href*='exportFileDowload']` |
+
+几个必须注意的地方：
+
+- **「高级查找」是 `#quickSearch`**，不是它旁边那个放大镜 `#searchItem`；点错会打开另一个查询框。
+- **预设按整词匹配**。列表里有「正向」和「上海正向」这种互为子串的名字，而当前选中的预设名同时显示在触发器上，按文本全局找会点回触发器、把下拉收起来。
+- **只点「查询」，绝不点「保存」**。预设里的日期条件（大于等于当月 1 号）由人工在 TMS 上维护，程序改了会影响所有共用这个视图的人；跨月时需要有人去 TMS 里把日期改成当月 1 号。
+- **下载中心同名任务很多**（别人也在导同一个功能）。锁定本轮那一行的规则是：功能名含 `maintainCompanyOrd` + 开始时间不早于我们点「导出」的时刻 + 状态为成功，取其中最新的一条。行里的时间只精确到分钟，所以时间窗往前放宽一分钟。
+- **左下角的「共 N 条」尽力读**：读到就拿去和 Excel 唯一订单数比对，读不到只记一条日志继续导出；但如果确确实实读到 0，说明表格是空的，这时候点导出 TMS 不会建任何任务，直接快速失败重试更划算。
+- **表格按行序号跨表合并**。Element UI 的固定列会把一行拆进两张 `<table>`：任务名在左边那份、下载图标在右边那份。程序一次 `evaluate` 把所有可见表格按行序号合起来读，既避开这个坑，也不用几十次 locator 往返。
+
+### 升级已有部署
+
+`tms.selectors` 的键名跟着流程一起换了。旧的 `config.yaml` 不用改也能跑——未知键会被忽略，程序直接用上面这套新的默认值，而新默认值本来就是对的。想让配置文件和实际行为对得上，把 `config.example.yaml` 里的 `tms:` 整段抄过去即可，只需要回填 `username`。
+
+| 旧键 | 新键 |
+| --- | --- |
+| `advanced_filter_button: "#searchItem"` | `advanced_search_button: "#quickSearch"` |
+| `preset_name` | `preset_trigger` + `preset_item` |
+| `download_button` | `export_button` |
+| `date_from_input` | 已删除（日期由人工在 TMS 上维护） |
+| — | 新增 `order_menu` / `order_page_menu` / `download_center_refresh` / `download_link` |
+
+`tms.url` 建议一并改成 `https://otb.lining.com/#/login`；留着旧的 `https://otb.lining.com/#/` 也能用，SPA 未登录时会自己跳到登录页。
 
 ## 注册 Windows 定时任务
 

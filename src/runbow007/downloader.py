@@ -27,7 +27,7 @@ class TmsAuthenticationError(TmsDownloadError):
 
 
 class TmsExportTaskNotFound(TmsDownloadError):
-    """Raised when an export click never produces a matching download-center task."""
+    """Raised when an export click never produces a usable download-center task."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +46,20 @@ class _ExportState:
     last_step: str | None = None
 
 
-class _StepTracker:
-    """Name the phase we are in so a failure says *where* it went wrong.
+@dataclass(frozen=True, slots=True)
+class _DownloadTask:
+    """One row of the download centre, already merged across fixed-column copies."""
 
-    之前失败只能看 traceback 猜环节，而且看不出"在这一步卡了多久"。这个记录当前
-    环节名和进入时间，异常时一起打出来，飞书告警里也带上。
-    """
+    started_at: datetime | None
+    record_count: int | None
+    succeeded: bool
+    failed: bool
+    href: str | None
+    text: str
+
+
+class _StepTracker:
+    """Name the phase we are in so a failure says *where* it went wrong."""
 
     __slots__ = ("name", "started")
 
@@ -60,6 +68,7 @@ class _StepTracker:
         self.started = time.monotonic()
 
     def enter(self, name: str) -> None:
+        logger.info("→ %s", name)
         self.name = name
         self.started = time.monotonic()
 
@@ -68,30 +77,61 @@ class _StepTracker:
         return time.monotonic() - self.started
 
 
+# 下载中心的表格被 Element UI 的固定列拆成多份 <table>：任务名可能在左边那份、
+# 下载图标在右边那份，同一条记录未必落在同一个 <tr> 里。一次 evaluate 把所有可见
+# 表格按行序号合并，既避开了这个坑，也避免几十次 locator 往返各自超时。
+_SCRAPE_DOWNLOAD_ROWS = """
+(linkSelector) => {
+  const merged = new Map();
+  for (const table of document.querySelectorAll('table')) {
+    const box = table.getBoundingClientRect();
+    if (box.width === 0 || box.height === 0) continue;
+    table.querySelectorAll('tbody tr').forEach((row, index) => {
+      let record = merged.get(index);
+      if (!record) {
+        record = { index: index, text: '', href: null };
+        merged.set(index, record);
+      }
+      const text = (row.innerText || '').replace(/\\s+/g, ' ').trim();
+      if (text) record.text = record.text ? record.text + ' ' + text : text;
+      const link = row.querySelector(linkSelector);
+      if (link && !record.href) record.href = link.getAttribute('href');
+    });
+  }
+  return Array.from(merged.values());
+}
+"""
+
+_ROW_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+
+
 class TmsDownloader:
-    # Playwright ignores the timeout passed to Locator.is_visible()/is_hidden() and
-    # falls back to the page default (navigation_timeout_seconds). On a busy TMS page a
-    # single probe then blocks for the full default and blows past the polling deadline
-    # that was supposed to contain it. Locator.wait_for() honours its timeout, so every
-    # visibility probe goes through _visible_now() below.
-    #
-    # 单次探测必须远小于循环时限，循环时限才有意义。_PROBE_TIMEOUT_MS 用于一次性的
-    # 可见性判断（确认窗口、下载链接、登录表单）。
+    """按《在TMS系统上下载数据》文档的四个步骤驱动李宁 TMS。
+
+    步骤一 登录；步骤二 订单管理 → 集团订单管理；步骤三 高级查找 → 选预设
+    「AI导出数据（勿动）」→ 查询 → 导出 → 确定；步骤四 下载中心 → 找到本轮那一行
+    → 点下载图标。每一步都只操作「可见」的那个元素：TMS 是标签页式 SPA，打开过的
+    页面全部留在 DOM 里，隐藏副本和真正在用的元素长得一模一样。
+    """
+
+    # Playwright 会忽略 Locator.is_visible(timeout=...) 里的超时、退回页面默认值，
+    # 于是一次探测就能把整个轮询时限吃光。所有可见性判断都走 wait_for()。
     _PROBE_TIMEOUT_MS = 1_000
-    # 查找元素分两阶段，见 _find_visible。8/17 白天的失败说明"每个候选各等 1 秒、
-    # 轮着来"在 TMS 慢的时候反而不如旧代码"死等第一个候选 45 秒"：页面卡住时每个
-    # 探测都会耗满超时，一轮扫下来就把时限用光，实际只扫了一两轮。
     _QUICK_PROBE_MS = 250
     _PATIENT_PROBE_MS = 15_000
+    _CLICK_TIMEOUT_MS = 5_000
     _ELEMENT_WAIT_SECONDS = 60
     _RETRY_DELAYS = (0, 60, 180)
-    # The hourly timer fires every 60 minutes and a second run is refused by the file
-    # lock, so a single run must never spend a whole hour retrying: it would silently
-    # eat the next slot. Give up on further attempts once the budget is spent.
+    # 整点定时器每 60 分钟触发一次，第二次运行会被文件锁拒绝，所以单轮绝不能
+    # 把一小时耗在重试上，否则等于悄悄吃掉下一个整点。
     _RUN_BUDGET_SECONDS = 50 * 60
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+
+    # ------------------------------------------------------------------
+    # 重试 / 预算 / 看门狗：这几层不属于「操作步骤」，是兜住浏览器异常的安全网
+    # ------------------------------------------------------------------
 
     def download(self, dataset: str = "current_month") -> DownloadResult:
         last_error: Exception | None = None
@@ -120,11 +160,9 @@ class TmsDownloader:
                 raise
             except Exception as exc:  # browser errors are normalized at the boundary
                 if isinstance(exc, TmsExportTaskNotFound):
-                    # The confirmation toast is not reliable. If the download center also
-                    # has no matching task after a bounded wait, the click did not create
-                    # an observable export and the next attempt must click Export again.
+                    # 导出点击没有变成一条可用的任务，下一次必须重新走完步骤三。
                     state.task_created = False
-                    logger.warning("下载中心未发现本轮任务，下次重试将重新执行导出")
+                    logger.warning("下载中心没有本轮可用任务，下次重试将重新执行导出")
                 last_error = exc
                 logger.exception("TMS 下载第 %s 次失败", attempt)
         where = f"，最后卡在「{state.last_step}」" if state.last_step else ""
@@ -136,13 +174,9 @@ class TmsDownloader:
     def _attempt_watchdog(self) -> Iterator[None]:
         """Hard wall-clock ceiling for one attempt, independent of the browser.
 
-        我们所有的超时都是"建议性"的：Playwright 的 timeout 靠驱动回消息才能触发，
-        循环里的 deadline 靠调用能返回才会被检查，50 分钟的单轮预算只在两次尝试
-        之间生效。浏览器渲染进程一卡死，这三层全部失效——2026-08-17 18:28 一次
-        page.content() 挂了 70 分钟，把 19:05 那轮也一并堵掉。
-
-        SIGALRM 由内核投递，不依赖浏览器是死是活，是唯一真正兜得住的一层。
-        Windows 没有 SIGALRM（CI 会在 windows-latest 上跑），那里退化成无保护。
+        Playwright 的超时靠驱动回消息才会触发，循环里的 deadline 靠调用能返回才会
+        被检查——浏览器渲染进程一卡死这两层全部失效。SIGALRM 由内核投递，是唯一
+        真正兜得住的一层。Windows 没有 SIGALRM，那里退化成无保护。
         """
         seconds = self.config.tms.attempt_timeout_seconds
         if seconds <= 0 or not hasattr(signal, "SIGALRM"):
@@ -160,15 +194,18 @@ class TmsDownloader:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous)
 
+    @staticmethod
+    def _budget_remaining(state: _ExportState) -> float | None:
+        if state.budget_deadline is None:
+            return None
+        return state.budget_deadline - time.monotonic()
+
     def _new_browser(self, playwright: object) -> tuple[object, object]:
         """Start from a clean browser unless the profile is explicitly opted into.
 
-        持久化 profile 会把上一轮的标签页、缓存和 DOM 状态全带到下一轮。TMS 又是
-        标签页式 SPA、视图状态还按账号共享，于是每轮启动时"DOM 里有几个标签页、
-        停在哪个视图、哪些元素可见"完全不确定，所有选择器都在这片流沙上撞运气。
-        凌晨 01–07 七轮全成、白天一半在挂，差别就在于白天有人在动这个账号。
-
-        改成每轮全新浏览器 + 重新登录，用几秒登录时间换一个确定的起点。
+        持久化 profile 会把上一轮的标签页、缓存和 DOM 状态全带到下一轮，而 TMS 的
+        视图状态还是账号级共享的，于是每轮的起点都不确定。每轮全新浏览器 + 重新
+        登录，用几秒登录时间换一个确定的起点。
         """
         headless = self.config.tms.headless
         if self.config.tms.persistent_profile:
@@ -185,9 +222,7 @@ class TmsDownloader:
         """Dump a screenshot and the DOM so the next failure needs no guessing.
 
         截图先做，因为它能带 timeout。截图失败说明浏览器已经不响应了，这时候绝不能
-        再去调 page.content()——那个 API 不接受 timeout 参数，页面卡死时会无限期挂着。
-        2026-08-17 18:28 就是这么挂了 70 分钟，把整个 19:05 轮次也堵掉了，而这段
-        代码本来只是用来收集诊断信息的。
+        再去调 page.content()——那个 API 不接受 timeout，页面卡死时会无限期挂着。
         """
         if page is None:
             return
@@ -208,11 +243,9 @@ class TmsDownloader:
         except Exception:  # pragma: no cover - diagnostics must never mask the cause
             logger.warning("保存页面 HTML 时出错", exc_info=True)
 
-    @staticmethod
-    def _budget_remaining(state: _ExportState) -> float | None:
-        if state.budget_deadline is None:
-            return None
-        return state.budget_deadline - time.monotonic()
+    # ------------------------------------------------------------------
+    # 一次完整的四步操作
+    # ------------------------------------------------------------------
 
     def _download_once(
         self, dataset: str, *, state: _ExportState | None = None
@@ -240,68 +273,41 @@ class TmsDownloader:
                     self.config.tms.navigation_timeout_seconds * 1000
                 )
 
-                step.enter("打开 TMS 首页")
+                step.enter("步骤一 登录")
                 page.goto(self.config.tms.url, wait_until="domcontentloaded")
-                logger.info("TMS 首页已加载，检查登录状态")
+                self._login(page, password)
 
-                step.enter("登录")
-                self._login_if_needed(page, password)
-                if not state.task_created:
-                    step.enter("打开集团订单管理")
-                    logger.info("TMS 登录状态确认完成，打开集团订单管理")
+                if state.task_created:
+                    logger.info(
+                        "上一次尝试已经建好导出任务，直接去下载中心取件；页面总数=%s",
+                        state.expected_total,
+                    )
+                else:
+                    step.enter("步骤二 打开集团订单管理")
                     self._open_order_page(page)
 
-                    step.enter("应用筛选并查询")
-                    logger.info("集团订单管理已打开，应用数据筛选")
-                    self._apply_filters(page, dataset)
+                    step.enter("步骤三 高级查找并应用预设")
+                    self._apply_preset(page, dataset)
 
-                    step.enter("等待订单表格出数据")
-                    ui_total = self._wait_for_orders_loaded(page)
-                    if ui_total is not None and ui_total > 0:
-                        if state.expected_total is None:
-                            state.expected_total = ui_total
-                        elif state.expected_total != ui_total:
-                            logger.warning(
-                                "TMS 页面订单总数由 %s 变为 %s，继续使用首次有效总数",
-                                state.expected_total,
-                                ui_total,
-                            )
-                    logger.info(
-                        "TMS 筛选完成，页面订单总数=%s，本轮匹配总数=%s",
-                        ui_total,
-                        state.expected_total,
-                    )
+                    step.enter("步骤三 等待表格加载并读取总数")
+                    ui_total = self._wait_for_grid(page)
+                    if ui_total and state.expected_total is None:
+                        state.expected_total = ui_total
 
-                    step.enter("查找导出按钮")
-                    button = self._visible_locator_or_button(
-                        page, self.config.tms.selectors.download_button, r"下载|批量导出"
-                    )
-
-                    step.enter("点击导出并确认")
-                    # Anchor the download-center window on the click itself. Anchoring
-                    # it on the start of the run left minutes of slack in which somebody
-                    # else's export could be mistaken for ours.
+                    step.enter("步骤三 点击导出并确认")
+                    # 归属判断的时间窗必须锚在「点导出」这一刻，锚在整轮开始会留出
+                    # 几分钟空档，别人的导出会被误认成我们的。
                     state.not_before = self._local_now()
-                    self._dom_click(button, "导出")
-                    logger.info("已点击导出，等待确认窗口")
-                    self._confirm_export(page)
+                    self._export(page)
                     state.task_created = True
-                    logger.info("导出任务已创建，进入下载中心核验")
-                else:
-                    logger.info(
-                        "前次已创建导出任务，直接在下载中心复用；匹配总数=%s",
-                        state.expected_total,
-                    )
 
-                download = self._download_from_center(
-                    page,
-                    state.not_before,
-                    state.expected_total,
-                    budget_seconds=self._budget_remaining(state),
-                    step=step,
-                )
+                step.enter("步骤四 进入下载中心")
+                self._open_download_center(page)
 
-                step.enter("保存 Excel")
+                step.enter("步骤四 等待本轮导出任务完成")
+                download = self._wait_for_export_file(page, state, step)
+
+                step.enter("步骤四 保存 Excel")
                 suggested = Path(download.suggested_filename)
                 suffix = suggested.suffix.lower() if suggested.suffix else ".xls"
                 target = run_dir / f"{dataset}-{uuid.uuid4().hex[:12]}{suffix}"
@@ -326,97 +332,204 @@ class TmsDownloader:
             raise TmsDownloadError("浏览器报告下载完成，但文件为空")
         return DownloadResult(target, state.expected_total, dataset)
 
-    def _login_if_needed(self, page: object, password: str) -> None:
+    # ------------------------------------------------------------------
+    # 步骤一：登录
+    # ------------------------------------------------------------------
+
+    def _login(self, page: object, password: str) -> None:
+        """输入用户名、密码，点击登录。
+
+        TMS 是 SPA，DOMContentLoaded 之后登录表单还要再挂载一会儿；持久化 profile
+        模式下也可能直接跳过登录页。所以同时等「用户名输入框」和「已登录的标志」，
+        谁先出现听谁的。
+        """
         selectors = self.config.tms.selectors
-        username = page.locator(selectors.username).first
-        # TMS 是 SPA，DOMContentLoaded 后登录表单或首页菜单仍会延迟挂载。
-        visible = False
-        deadline = time.monotonic() + 15
+        username = page.locator(selectors.username)
+        signed_in = page.locator(selectors.download_center_menu)
+
+        deadline = time.monotonic() + self.config.tms.navigation_timeout_seconds
+        form = None
         while time.monotonic() < deadline:
-            if self._visible_now(username):
-                visible = True
+            form = self._first_visible(username, timeout_ms=self._QUICK_PROBE_MS)
+            if form is not None:
                 break
-            home = page.get_by_text("下载中心", exact=True)
-            if self._any_visible(home):
+            if self._first_visible(signed_in, timeout_ms=self._QUICK_PROBE_MS):
+                logger.info("会话仍然有效，跳过登录")
                 return
             page.wait_for_timeout(250)
-        if not visible:
-            return
-        username.fill(self.config.tms.username)
-        page.locator(selectors.password).first.fill(password)
-        button = self._locator_or_button(page, selectors.login_button, r"登录|登 录")
-        button.click()
-        try:
-            page.wait_for_function(
-                "() => !location.hash.includes('/login')", timeout=15_000
-            )
-        except Exception:
-            pass
-        if self._visible_now(username, timeout_ms=5_000):
-            raise TmsAuthenticationError("TMS 登录后仍停留在登录页，请检查账号或密码")
+        if form is None:
+            raise TmsDownloadError("登录页未加载出用户名输入框")
 
-    @classmethod
-    def _open_order_page(cls, page: object) -> None:
-        advanced = page.locator("#searchItem").first
-        if advanced.count() and cls._visible_now(advanced):
-            return
-        cls._click_visible_text(page, "订单管理")
-        page.wait_for_timeout(500)
-        cls._click_visible_text(page, "集团订单管理")
-        advanced.wait_for(state="visible", timeout=30_000)
+        form.fill(self.config.tms.username)
+        self._wait_visible(page, selectors.password, "密码输入框", seconds=15).fill(
+            password
+        )
+        self._click(
+            self._wait_visible(page, selectors.login_button, "登录按钮", seconds=15),
+            "登录",
+        )
 
-    def _apply_filters(self, page: object, dataset: str) -> None:
+        deadline = time.monotonic() + self.config.tms.navigation_timeout_seconds
+        errors = page.locator(".el-message--error, .el-message--warning")
+        while time.monotonic() < deadline:
+            if self._first_visible(signed_in, timeout_ms=self._QUICK_PROBE_MS):
+                logger.info("TMS 登录成功")
+                return
+            failed = self._first_visible(errors, timeout_ms=self._QUICK_PROBE_MS)
+            if failed is not None:
+                raise TmsAuthenticationError(
+                    f"TMS 拒绝登录: {self._safe_text(failed)[:120]}"
+                )
+            page.wait_for_timeout(250)
+        raise TmsAuthenticationError("TMS 登录后未进入主页面，请检查账号或密码")
+
+    # ------------------------------------------------------------------
+    # 步骤二：订单管理 → 集团订单管理
+    # ------------------------------------------------------------------
+
+    def _open_order_page(self, page: object) -> None:
+        """点击「订单管理」，再点击展开后的「集团订单管理」。
+
+        左侧菜单里父级和子级都叫「订单管理」，所以父级只在 .el-submenu__title 里按
+        整词匹配，子级只在 li.el-menu-item 里按整词匹配。菜单已经展开时不要再点父级
+        ——那一下会把它收起来。
+        """
         selectors = self.config.tms.selectors
-        advanced = self._locator_or_button(page, selectors.advanced_filter_button, r"高级筛选")
-        advanced.click()
+        entry = page.locator(selectors.order_page_menu).get_by_text(
+            "集团订单管理", exact=True
+        )
+        if self._first_visible(entry, timeout_ms=self._QUICK_PROBE_MS) is None:
+            parent = self._wait_visible_any(
+                page,
+                [page.locator(selectors.order_menu).get_by_text("订单管理", exact=True)],
+                "订单管理",
+                seconds=30,
+            )
+            self._click(parent, "订单管理")
+            page.wait_for_timeout(500)
+        self._click(
+            self._wait_visible_any(page, [entry], "集团订单管理", seconds=30),
+            "集团订单管理",
+        )
+        self._wait_visible(page, selectors.advanced_search_button, "高级查找按钮")
+
+    # ------------------------------------------------------------------
+    # 步骤三：高级查找 → 预设 → 查询 → 导出 → 确定
+    # ------------------------------------------------------------------
+
+    def _apply_preset(self, page: object, dataset: str) -> None:
+        selectors = self.config.tms.selectors
+        self._click(
+            self._wait_visible(page, selectors.advanced_search_button, "高级查找"),
+            "高级查找",
+        )
         preset = (
             self.config.tms.current_month_preset
             if dataset == "current_month"
             else self.config.tms.open_carryover_preset
         )
         if preset:
-            # 视图状态是账号级共享且粘性的——默认视图就是"上一次操作的视图"，别人
-            # （或人工在浏览器里）切过视图，下一轮就会继承那个。所以每轮都必须显式
-            # 选回预设，否则可能拿着别的视图的筛选范围导出，条数校验还查不出来。
-            preset_trigger = selectors.preset_name or ".el-dialog:visible .page-header-title"
-            page.locator(preset_trigger).first.click()
-            self._click_visible_text(page, preset)
-        # 日期不再填：预设自身已经带了日期范围，重复填写只是多一个会出错的操作。
-        query = self._locator_or_button(page, selectors.query_button, r"查询")
-        query.click()
-        self._wait_for_grid_loading(page)
+            # 预设是账号级共享且粘性的：默认选中的永远是「上一次用过的那个」，别人
+            # 在浏览器里切过，我们下一轮就会继承。所以每轮都必须显式选回来。
+            self._click(
+                self._wait_visible(page, selectors.preset_trigger, "预设模板选择"),
+                "预设模板选择",
+            )
+            self._choose_preset(page, preset)
+        else:
+            logger.warning("未配置预设名称，直接使用页面当前的查询条件")
+        # 只点「查询」，绝不点「保存」：预设里的日期条件由人工维护，程序改了会影响
+        # 所有共用这个视图的人。
+        self._click(
+            self._wait_visible_any(
+                page,
+                [
+                    page.locator(selectors.query_button).filter(has_text="查询"),
+                    page.get_by_role("button", name="查询"),
+                ],
+                "查询",
+            ),
+            "查询",
+        )
 
-    def _wait_for_grid_loading(self, page: object) -> None:
+    def _choose_preset(self, page: object, preset: str) -> None:
+        """在下拉框里选中指定预设，按整词匹配。
+
+        列表里有「正向」和「上海正向」这种互为子串的名字，子串匹配会选错；而当前
+        选中的预设名同时也显示在触发器上，按文本全局找又会点回触发器、把下拉收起来。
+        所以只在 .search-item 里逐项比对。
+        """
+        wanted = self._normalize(preset)
+        items = page.locator(self.config.tms.selectors.preset_item)
+        deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
+        labels: list[str] = []
+        while time.monotonic() < deadline:
+            labels = []
+            try:
+                total = items.count()
+            except Exception:
+                total = 0
+            for index in range(total):
+                item = items.nth(index)
+                text = self._safe_text(item)
+                if not text:
+                    continue
+                labels.append(text)
+                if self._normalize(text) == wanted:
+                    self._click(item, f"预设「{preset}」")
+                    return
+            page.wait_for_timeout(250)
+        available = "、".join(labels[:30]) if labels else "（没读到任何选项）"
+        raise TmsDownloadError(f"高级查找里没有预设「{preset}」，当前可选: {available}")
+
+    def _wait_for_grid(self, page: object) -> int | None:
+        """等「拼命加载中」遮罩散掉，并尽力读出左下角的「共 N 条」。
+
+        总数只是给 Excel 行数校验用的参考值，读不到不影响导出，记一条日志继续；
+        但如果确确实实读到了 0，那就是在空表格上点导出——TMS 不会建任何任务，等于
+        白烧掉一整次尝试，这种情况直接失败更快。
+        """
+        deadline = time.monotonic() + self.config.tms.grid_load_timeout_seconds
+        self._wait_out_loading_mask(page, deadline)
+        if not self.config.tms.selectors.total_count:
+            return None
+        total: int | None = None
+        while time.monotonic() < deadline:
+            total = self._read_total(page)
+            if total:
+                logger.info("集团订单管理页面总数: 共 %s 条", total)
+                return total
+            page.wait_for_timeout(500)
+        if total == 0:
+            raise TmsDownloadError(
+                f"筛选后 {self.config.tms.grid_load_timeout_seconds} 秒内页面仍显示"
+                "共 0 条，本次不执行导出"
+            )
+        logger.warning("未能读到页面总数，跳过总数校验继续导出")
+        return None
+
+    def _wait_out_loading_mask(self, page: object, deadline: float) -> None:
         """Wait out the "拼命加载中" mask that TMS shows while the grid loads.
 
-        networkidle 在 TMS 上几乎必然超时（后台请求就没停过），之前只能退回"死等
-        2 秒"，数据量大时远远不够。Element UI 的加载遮罩才是准确信号：它出现代表
-        查询发出去了，它消失代表表格渲染完了。
+        networkidle 在 TMS 上几乎必然超时（后台请求就没停过）。Element UI 的加载
+        遮罩才是准确信号：它出现代表查询发出去了，它消失代表表格渲染完了。
         """
         mask = page.locator(".el-loading-mask")
-        # 点查询到遮罩挂上有延迟；没等到也不算错，可能查询快到遮罩一闪而过。
-        appeared = self._visible_now(mask.first, timeout_ms=5_000)
-        if not appeared:
+        if not self._visible_now(mask.first, timeout_ms=5_000):
             logger.info("未捕获到加载遮罩，直接按超时等待表格")
-        deadline = time.monotonic() + self.config.tms.grid_load_timeout_seconds
+            return
         while time.monotonic() < deadline:
             if not self._any_visible(mask):
                 return
             page.wait_for_timeout(500)
-        logger.warning(
-            "加载遮罩 %s 秒内未消失，继续尝试读取表格",
-            self.config.tms.grid_load_timeout_seconds,
-        )
+        logger.warning("加载遮罩未在限定时间内消失，继续尝试读取表格")
 
     def _read_total(self, page: object) -> int | None:
         """Read the order count from the *visible* pagination control.
 
-        TMS 是标签页式 SPA，打开过的页面全都留在 DOM 里，非活动的只是隐藏。实测
-        （2026-08-17 在真实页面上跑 querySelectorAll）button.pagination-total 会同时
-        匹配到两个：集团订单管理的「共 4753 条」和下载中心的「共 34920 条」。
-
-        原来硬取 .first 等于赌 DOM 顺序——赌输了就一直在读另一个标签页的分页，而且
-        那个数字永远不会变成我们要的值，等多久都没用。改成只认可见的那个。
+        TMS 是标签页式 SPA，打开过的页面全都留在 DOM 里，非活动的只是隐藏。
+        button.pagination-total 会同时匹配到集团订单管理的「共 4753 条」和下载中心的
+        「共 34920 条」，硬取 .first 等于赌 DOM 顺序。只认可见的那个。
         """
         selector = self.config.tms.selectors.total_count
         if not selector:
@@ -430,246 +543,232 @@ class TmsDownloader:
             candidate = matches.nth(index)
             if not self._visible_now(candidate, timeout_ms=self._QUICK_PROBE_MS):
                 continue
-            try:
-                text = candidate.inner_text(timeout=self._PROBE_TIMEOUT_MS)
-            except Exception:
-                # 分页组件还没挂载。不能按页面默认的 45 秒硬等——那会直接搞挂
-                # 一整次尝试（2026-08-16 23:59 那轮就是 inner_text 超时抛的）。
-                continue
-            match = re.search(r"([\d,]+)", text)
+            match = re.search(r"([\d,]+)", self._safe_text(candidate))
             if match:
                 return int(match.group(1).replace(",", ""))
         return None
 
-    def _wait_for_orders_loaded(self, page: object) -> int | None:
-        """Wait until the filtered grid actually reports rows before exporting.
-
-        _apply_filters 只固定等 2 秒，而 networkidle 在 TMS 上几乎必然超时跳过，
-        所以经常在"分页组件已渲染、数据还没回来"的瞬间读到 0。带着 0 继续往下走
-        就是在空表格上点导出：TMS 没有数据可导，不会创建任何任务，然后在下载中心
-        白等 8 分钟才发现（2026-08-17 15:05 那轮为此烧掉 9 分钟）。
-
-        这里改成轮询等真实条数，等不到就快速失败——把时间留给下一次重试，而不是
-        喂给一个注定无效的导出。
-        """
-        if not self.config.tms.selectors.total_count:
-            return None
-        wait_seconds = self.config.tms.grid_load_timeout_seconds
-        deadline = time.monotonic() + wait_seconds
-        while time.monotonic() < deadline:
-            total = self._read_total(page)
-            if total:
-                return total
-            page.wait_for_timeout(500)
-        raise TmsDownloadError(
-            f"筛选后 {wait_seconds} 秒内订单总数仍为 0，表格未加载完成，本次不执行导出"
+    def _export(self, page: object) -> None:
+        selectors = self.config.tms.selectors
+        self._click(
+            self._wait_visible(page, selectors.export_button, "导出"),
+            "导出",
         )
+        logger.info("已点击导出，等待确认窗口")
+        self._click(
+            self._wait_visible_any(
+                page, [page.get_by_role("button", name="确定")], "确定"
+            ),
+            "确定",
+        )
+        toast = page.get_by_text("下载任务添加成功", exact=False)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self._any_visible(toast):
+                logger.info("导出任务已创建")
+                return
+            page.wait_for_timeout(250)
+        # 成功提示是短暂 toast，页面慢时可能在定位前就消失了。下载中心才是最终依据。
+        logger.info("未捕获到导出成功提示，改由下载中心核验")
+
+    # ------------------------------------------------------------------
+    # 步骤四：下载中心 → 找到本轮那一行 → 点下载图标
+    # ------------------------------------------------------------------
+
+    def _open_download_center(self, page: object) -> None:
+        """点右上角的「下载中心」，等它的表格真的出来。
+
+        入口的文本节点前后带大量空白，get_by_text 经常匹配不上；图标类名
+        thorn6-icon-xiazai 唯一且稳定，所以选择器优先、文本兜底。
+        """
+        selectors = self.config.tms.selectors
+        rows = page.locator("tbody tr")
+        for attempt in range(1, 3):
+            menu = self._wait_visible_any(
+                page,
+                [
+                    page.locator(selectors.download_center_menu),
+                    page.get_by_text("下载中心", exact=True),
+                ],
+                "下载中心",
+                seconds=self._ELEMENT_WAIT_SECONDS,
+            )
+            self._click(menu, "下载中心")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if self._first_visible(rows, timeout_ms=self._QUICK_PROBE_MS):
+                    return
+                page.wait_for_timeout(500)
+            logger.warning("第 %s 次进入下载中心后表格没出来，重试", attempt)
+        raise TmsDownloadError("进入下载中心后始终没有加载出任务列表")
+
+    def _wait_for_export_file(
+        self, page: object, state: _ExportState, step: _StepTracker
+    ) -> object:
+        """轮询下载中心，锁定本轮那一行并点下载图标。
+
+        同名任务页面上会有很多（别人也在导），归属判断按文档的做法：功能名匹配 +
+        开始时间不早于我们点「导出」的时刻 + 状态成功，取其中最新的一条。行里的
+        时间只精确到分钟，所以时间窗往前放宽一分钟。
+        """
+        tms = self.config.tms
+        wait_seconds = float(tms.download_timeout_seconds)
+        budget = self._budget_remaining(state)
+        if budget is not None:
+            wait_seconds = min(wait_seconds, max(budget, 60.0))
+        deadline = time.monotonic() + wait_seconds
+        appear_deadline = min(deadline, time.monotonic() + tms.export_task_appear_minutes * 60)
+        earliest = state.not_before - timedelta(minutes=1)
+        logger.info(
+            "在下载中心等待「%s」且开始时间不早于 %s 的成功任务",
+            tms.export_task_keyword,
+            earliest,
+        )
+
+        task_seen = False
+        missing_link_logged = False
+        last_snapshot: tuple[object, ...] | None = None
+        while True:
+            mine = [
+                task
+                for task in self._collect_tasks(page)
+                if task.started_at is not None and task.started_at >= earliest
+            ]
+            mine.sort(key=lambda task: task.started_at, reverse=True)
+            if mine:
+                task_seen = True
+                newest = mine[0]
+                snapshot = (
+                    newest.started_at,
+                    newest.record_count,
+                    newest.succeeded,
+                    newest.failed,
+                )
+                if snapshot != last_snapshot:
+                    logger.info(
+                        "下载中心本轮最新任务: 开始时间=%s 记录数=%s 成功=%s 失败=%s"
+                        "（页面总数=%s）",
+                        newest.started_at,
+                        newest.record_count,
+                        newest.succeeded,
+                        newest.failed,
+                        state.expected_total,
+                    )
+                    last_snapshot = snapshot
+                ready = [task for task in mine if task.succeeded and task.href]
+                if ready:
+                    step.enter("步骤四 下载 Excel")
+                    return self._click_download_link(page, ready[0], deadline)
+                if any(task.failed for task in mine) and not any(
+                    task.succeeded for task in mine
+                ):
+                    raise TmsExportTaskNotFound(
+                        f"下载中心本轮任务状态为失败: {mine[0].text[:200]}"
+                    )
+                if not missing_link_logged and any(
+                    task.succeeded and not task.href for task in mine
+                ):
+                    logger.warning("任务已成功但还没渲染出下载图标，继续刷新")
+                    missing_link_logged = True
+
+            now = time.monotonic()
+            if not task_seen and now >= appear_deadline:
+                raise TmsExportTaskNotFound(
+                    f"点击导出后 {tms.export_task_appear_minutes} 分钟内，"
+                    "下载中心没有出现本轮任务"
+                )
+            if now >= deadline:
+                break
+            self._refresh_download_center(page)
+            page.wait_for_timeout(3_000)
+        raise TmsDownloadError("下载中心任务在超时时间内未完成")
+
+    def _collect_tasks(self, page: object) -> list[_DownloadTask]:
+        selectors = self.config.tms.selectors
+        try:
+            rows = page.evaluate(_SCRAPE_DOWNLOAD_ROWS, selectors.download_link)
+        except Exception:
+            logger.warning("读取下载中心表格失败，稍后重试", exc_info=True)
+            return []
+        keyword = self.config.tms.export_task_keyword
+        tasks: list[_DownloadTask] = []
+        for row in rows or []:
+            text = (row or {}).get("text") or ""
+            if keyword not in text:
+                continue
+            started_at, record_count = self._parse_download_row(text)
+            tasks.append(
+                _DownloadTask(
+                    started_at=started_at,
+                    record_count=record_count,
+                    succeeded="成功" in text,
+                    failed="失败" in text,
+                    href=row.get("href"),
+                    text=text,
+                )
+            )
+        return tasks
+
+    def _click_download_link(
+        self, page: object, task: _DownloadTask, deadline: float
+    ) -> object:
+        selector = (
+            f"{self.config.tms.selectors.download_link}"
+            f'[href="{self._escape_attribute(task.href or "")}"]'
+        )
+        matches = page.locator(selector)
+        link = self._first_visible(matches, timeout_ms=self._QUICK_PROBE_MS)
+        if link is None:
+            link = matches.first
+        remaining_ms = max(5, int(deadline - time.monotonic())) * 1_000
+        logger.info(
+            "开始下载本轮任务: 开始时间=%s 记录数=%s", task.started_at, task.record_count
+        )
+        with page.expect_download(timeout=remaining_ms) as info:
+            self._click(link, "下载图标")
+        return info.value
+
+    def _refresh_download_center(self, page: object) -> None:
+        selector = self.config.tms.selectors.download_center_refresh
+        if not selector:
+            return
+        button = self._first_visible(
+            page.locator(selector), timeout_ms=self._QUICK_PROBE_MS
+        )
+        if button is None:
+            return
+        try:
+            self._click(button, "刷新")
+        except Exception:  # pragma: no cover - refreshing is best effort
+            logger.debug("刷新下载中心失败", exc_info=True)
+
+    @staticmethod
+    def _parse_download_row(text: str) -> tuple[datetime | None, int | None]:
+        """列顺序是 功能 / 状态 / 开始时间 / 结束时间 / 导出记录数 / 文件大小。"""
+        flat = re.sub(r"\s+", " ", text).strip()
+        stamps = _ROW_TIMESTAMP.findall(flat)
+        if not stamps:
+            return None, None
+        started_at = datetime.strptime(stamps[0], "%Y-%m-%d %H:%M")
+        tail = flat[flat.rindex(stamps[-1]) + len(stamps[-1]) :]
+        numbers = re.findall(r"\d+", tail)
+        return started_at, int(numbers[0]) if numbers else None
+
+    # ------------------------------------------------------------------
+    # 通用元素操作
+    # ------------------------------------------------------------------
 
     def _local_now(self) -> datetime:
         # TMS 下载中心显示的是配置时区的无时区时间，统一成同口径后再比较。
         return datetime.now(ZoneInfo(self.config.runtime.timezone)).replace(tzinfo=None)
 
-    def _confirm_export(self, page: object) -> None:
-        confirms = page.get_by_role("button", name="确定")
-        deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
-        clicked = False
-        while time.monotonic() < deadline:
-            for index in range(confirms.count()):
-                confirm = confirms.nth(index)
-                if self._visible_now(confirm):
-                    self._dom_click(confirm, "确定")
-                    clicked = True
-                    break
-            if clicked:
-                break
-            page.wait_for_timeout(250)
-        if not clicked:
-            raise TmsDownloadError("点击导出后未出现确认窗口")
-
-        success = page.get_by_text("下载任务添加成功", exact=False)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if self._any_visible(success):
-                return
-            page.wait_for_timeout(250)
-        # 成功提示是短暂 toast，页面响应慢时可能在定位前已消失。下载中心的
-        # 最新任务时间、状态和条数才是最终确认依据，因此这里继续轮询下载中心。
-        logger.info("未捕获到导出成功提示，继续在下载中心核验任务")
-
-    def _open_download_center(self, page: object) -> None:
-        """Reach the download centre without relying on a text match.
-
-        右上角这个入口在真实页面里长这样（2026-08-17 从 DOM 抓的）：
-
-            <ul class="right_menu">
-              <li class="menu-item"><i class="thorn6-icon thorn6-icon-xiazai"></i>
-                下载中心
-              </li>
-
-        图标类名唯一且稳定，跟导出按钮用的 thorn6-icon-daoru 是同一套模式；而
-        get_by_text("下载中心", exact=True) 匹配的文本节点前后带大量空白，今天
-        10:05 和 14:05 第 1 次都没找到它，各白烧掉一整次尝试。
-
-        再找不到就重新加载首页重来一次：导出任务此时已经在服务端建好了，页面状态
-        不再重要，换一份干净的 DOM 比放弃整次尝试便宜得多——14:05 第 2 次正是靠
-        重开浏览器后 10 秒就找到了。
-        """
-        selector = self.config.tms.selectors.download_center_menu
-        for attempt in range(2):
-            collections = []
-            if selector:
-                collections.append(page.locator(selector))
-            collections.append(page.get_by_text("下载中心", exact=True))
-            deadline = time.monotonic() + self._ELEMENT_WAIT_SECONDS
-            menu = self._find_visible(page, collections, deadline)
-            if menu is not None:
-                # 导出成功提示层可能盖住菜单，用 DOM click 避免覆盖层截获鼠标事件。
-                menu.evaluate("element => element.click()")
-                return
-            if attempt:
-                break
-            logger.warning("未找到下载中心入口，重新加载首页后重试")
-            page.goto(self.config.tms.url, wait_until="domcontentloaded")
-            page.wait_for_timeout(2_000)
-        raise TmsDownloadError("页面未找到可见元素: 下载中心")
-
-    def _download_from_center(
-        self,
-        page: object,
-        export_started: datetime,
-        expected_total: int | None,
-        *,
-        budget_seconds: float | None = None,
-        step: _StepTracker | None = None,
-    ) -> object:
-        if step is not None:
-            step.enter("进入下载中心")
-        self._open_download_center(page)
-        page.wait_for_timeout(2_000)
-        if step is not None:
-            step.enter("等待下载中心出现本轮任务")
-        wait_seconds = self.config.tms.download_timeout_seconds
-        if budget_seconds is not None:
-            wait_seconds = min(wait_seconds, max(budget_seconds, 60.0))
-        deadline = time.monotonic() + wait_seconds
-        appear_minutes = self.config.tms.export_task_appear_minutes
-        task_appearance_deadline = min(
-            deadline, time.monotonic() + appear_minutes * 60
-        )
-        earliest = export_started - timedelta(minutes=1)
-        last_snapshot: tuple[object, ...] | None = None
-        matching_task_seen = False
-        link_missing_logged = False
-
-        while time.monotonic() < deadline:
-            # Element UI 会为固定列复制 tbody；只遍历包含任务名的完整任务行。
-            rows = page.locator("tr").filter(has_text="maintainCompanyOrderPage")
-            for index in range(min(rows.count(), 20)):
-                row = rows.nth(index)
-                text = row.inner_text()
-                if "maintainCompanyOrderPage" not in text:
-                    continue
-                started_at, record_count = self._parse_download_row(text)
-                if index == 0:
-                    snapshot = (started_at, record_count, "成功" in text, expected_total)
-                    if snapshot != last_snapshot:
-                        logger.info(
-                            "下载中心最新任务: started_at=%s records=%s success=%s "
-                            "expected=%s earliest=%s",
-                            started_at,
-                            record_count,
-                            "成功" in text,
-                            expected_total,
-                            earliest,
-                        )
-                        last_snapshot = snapshot
-                if started_at is None or started_at < earliest:
-                    continue
-                if not self._total_matches(record_count, expected_total):
-                    continue
-                matching_task_seen = True
-                if "失败" in text:
-                    raise TmsDownloadError(f"TMS 下载中心任务失败: {text[:200]}")
-                if "成功" not in text:
-                    continue
-                link = row.locator("a:has(img[src*='excel'])").first
-                if not link.count() or not self._visible_now(link):
-                    # 之前这里是静默 continue，于是"任务明明成功却下不下来"完全
-                    # 看不见：2026-08-17 17:59 匹配到了 success=True 的任务，却
-                    # 一直空转到 18:08 超时。Element UI 的固定列会把 tbody 复制
-                    # 成多份，含任务名的行和含下载图标的行可能根本不是同一个 tr。
-                    if not link_missing_logged:
-                        logger.warning(
-                            "已匹配到成功的任务但找不到可见的下载链接，继续刷新重试"
-                        )
-                        link_missing_logged = True
-                    continue
-                if step is not None:
-                    step.enter("下载 Excel 文件")
-                remaining = max(1, int(deadline - time.monotonic())) * 1_000
-                with page.expect_download(timeout=remaining) as info:
-                    link.click()
-                return info.value
-
-            self._click_first_visible_dom(page.locator("#refreshItem"))
-            page.wait_for_timeout(2_000)
-            if (
-                not matching_task_seen
-                and time.monotonic() >= task_appearance_deadline
-            ):
-                raise TmsExportTaskNotFound(
-                    f"点击导出后 {appear_minutes} 分钟内，下载中心未出现本轮匹配任务"
-                )
-
-        raise TmsDownloadError("TMS 下载中心任务在超时时间内未完成")
-
-    @staticmethod
-    def _parse_download_row(text: str) -> tuple[datetime | None, int | None]:
-        timestamps = re.findall(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", text)
-        started_at = (
-            datetime.strptime(timestamps[0], "%Y-%m-%d %H:%M") if timestamps else None
-        )
-        tokens = [item.strip() for item in re.split(r"[\r\n\t]+", text) if item.strip()]
-        numeric = [int(item) for item in tokens if item.isdigit()]
-        record_count = numeric[-2] if len(numeric) >= 2 else None
-        return started_at, record_count
-
-    def _total_matches(self, record_count: int | None, expected_total: int | None) -> bool:
-        """Accept the export task whose row count is close enough to the page total.
-
-        订单数在"读取页面总数"到"TMS 真正生成导出"之间会继续变化（实测一小时内
-        4672→4677），此前的严格相等比较会让本轮任务永远匹配不上，5 分钟后重新点击
-        导出，最终整轮失败。容差用于吸收这种漂移，同时仍然排除条数量级不同的
-        无关任务。
-        """
-        if expected_total is None:
-            # 页面总数没读出来（TMS 慢时 _read_total 会返回 0）就不做条数过滤，
-            # 只靠时间窗判断归属。这里一旦改成拒绝，本轮任务永远匹配不上。
-            return True
-        if record_count is None:
-            return False
-        drift = abs(record_count - expected_total)
-        if drift > self.config.tms.total_tolerance:
-            return False
-        if drift:
-            logger.info(
-                "下载中心任务条数 %s 与页面总数 %s 相差 %s，在容差 %s 内，按本轮任务处理",
-                record_count,
-                expected_total,
-                drift,
-                self.config.tms.total_tolerance,
-            )
-        return True
-
     @classmethod
     def _visible_now(cls, locator: object, *, timeout_ms: int | None = None) -> bool:
         """Bounded visibility probe.
 
-        ``Locator.is_visible(timeout=...)`` silently ignores its timeout and uses the
-        page default instead, so probing with it turned every polling loop in this
-        module into a single 45 秒 block that raised a raw ``TimeoutError`` past the
-        deadline it was supposed to respect. ``wait_for`` honours the timeout it is
-        given; a probe that does not resolve in time simply means "not visible yet".
+        ``Locator.is_visible(timeout=...)`` 会忽略传入的超时、退回页面默认值，于是
+        一次探测就能把整个轮询时限吃光。``wait_for`` 会遵守超时，探测不到就当作
+        「还不可见」。
         """
         try:
             locator.wait_for(
@@ -680,100 +779,90 @@ class TmsDownloader:
         return True
 
     @classmethod
-    def _find_visible(
-        cls, page: object, collections: list, deadline: float
-    ) -> object | None:
+    def _first_visible(cls, matches: object, *, timeout_ms: int | None = None) -> object | None:
+        """Return the visible copy when the SPA keeps hidden duplicates around."""
+        try:
+            total = matches.count()
+        except Exception:
+            return None
+        for index in range(total):
+            candidate = matches.nth(index)
+            if cls._visible_now(candidate, timeout_ms=timeout_ms):
+                return candidate
+        return None
+
+    @classmethod
+    def _any_visible(cls, matches: object) -> bool:
+        return cls._first_visible(matches) is not None
+
+    def _wait_visible(
+        self, page: object, selector: str, name: str, *, seconds: float | None = None
+    ) -> object:
+        return self._wait_visible_any(page, [page.locator(selector)], name, seconds=seconds)
+
+    @classmethod
+    def _wait_visible_any(
+        cls, page: object, collections: list, name: str, *, seconds: float | None = None
+    ) -> object:
         """Two-phase element hunt for a SPA that renders duplicate, slow toolbars.
 
-        阶段一用很短的探测快速扫一遍所有候选，挑出"已经可见"的那个——TMS 会把同一
-        个工具栏渲染多份，只有一份可见，这一步就是为了跳过隐藏的副本。
-
-        阶段二在一整轮都没扫到时，对第一个候选做一次长等待。TMS 慢的时候元素只是
-        还没渲染出来，继续用短探测轮询纯属空转；把耐心押在单个候选上，正是旧代码
-        （45 秒默认超时）在这种场景下反而能成功的原因。
+        阶段一用很短的探测快速扫一遍所有候选，挑出已经可见的那个——TMS 会把同一个
+        工具栏渲染多份，只有一份可见。阶段二在一整轮都没扫到时，对第一个候选做一次
+        长等待：元素只是还没渲染出来时，继续用短探测轮询纯属空转。
         """
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + (seconds or cls._ELEMENT_WAIT_SECONDS)
+        while True:
             for matches in collections:
-                for index in range(matches.count()):
-                    candidate = matches.nth(index)
-                    if cls._visible_now(candidate, timeout_ms=cls._QUICK_PROBE_MS):
-                        return candidate
-            if time.monotonic() >= deadline:
+                found = cls._first_visible(matches, timeout_ms=cls._QUICK_PROBE_MS)
+                if found is not None:
+                    return found
+            remaining_ms = int((deadline - time.monotonic()) * 1_000)
+            if remaining_ms <= 0:
                 break
             patient = next(
                 (matches.nth(0) for matches in collections if matches.count()), None
             )
             if patient is not None and cls._visible_now(
-                patient, timeout_ms=cls._PATIENT_PROBE_MS
+                patient, timeout_ms=min(cls._PATIENT_PROBE_MS, remaining_ms)
             ):
                 return patient
             page.wait_for_timeout(250)
-        return None
+        raise TmsDownloadError(f"页面未找到可见元素: {name}")
 
     @classmethod
-    def _any_visible(cls, matches: object) -> bool:
+    def _click(cls, locator: object, name: str) -> None:
+        """Real click first, DOM click as the fallback.
+
+        真实点击能触发挂在任何一层上的处理器；但 TMS 的成功提示层会盖住菜单、
+        Element UI 的工具栏又会反复重渲染，这时 Playwright 会一直重试到超时。
+        所以失败后退回 DOM click——元素已经确认可见，覆盖层拦不住它。
+        """
         try:
-            total = matches.count()
+            locator.scroll_into_view_if_needed(timeout=cls._CLICK_TIMEOUT_MS)
         except Exception:
-            return False
-        return any(cls._visible_now(matches.nth(index)) for index in range(total))
+            logger.debug("「%s」无法滚动到可视区域，直接尝试点击", name)
+        try:
+            locator.click(timeout=cls._CLICK_TIMEOUT_MS)
+            return
+        except Exception:
+            logger.info("「%s」常规点击未成功，改用 DOM click", name)
+        try:
+            locator.evaluate("element => element.click()")
+        except Exception as exc:
+            raise TmsDownloadError(f"点击「{name}」失败: {exc}") from exc
+
+    @classmethod
+    def _safe_text(cls, locator: object) -> str:
+        """Read text without letting a not-yet-mounted node block for the page default."""
+        try:
+            return (locator.inner_text(timeout=cls._PROBE_TIMEOUT_MS) or "").strip()
+        except Exception:
+            return ""
 
     @staticmethod
-    def _locator_or_button(page: object, selector: str, name_pattern: str) -> object:
-        if selector:
-            return page.locator(selector).first
-        return page.get_by_role("button", name=re.compile(name_pattern)).last
-
-    @classmethod
-    def _visible_locator_or_button(
-        cls, page: object, selector: str, name_pattern: str
-    ) -> object:
-        """Return the visible button when the SPA keeps hidden duplicate toolbars."""
-        collections = []
-        if selector:
-            collections.append(page.locator(selector))
-        collections.append(
-            page.get_by_role("button", name=re.compile(name_pattern))
-        )
-        deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
-        button = cls._find_visible(page, collections, deadline)
-        if button is None:
-            raise TmsDownloadError("页面未找到可见的导出按钮")
-        return button
-
-    @classmethod
-    def _click_first_visible_dom(cls, matches: object) -> bool:
-        """Click the visible copy when the SPA renders duplicate toolbar controls."""
-        for index in range(matches.count()):
-            candidate = matches.nth(index)
-            if cls._visible_now(candidate):
-                candidate.evaluate("element => element.click()")
-                return True
-        return False
+    def _normalize(text: str) -> str:
+        return re.sub(r"\s+", "", text)
 
     @staticmethod
-    def _dom_click(locator: object, name: str) -> None:
-        # 调用方已经用 _visible_now 确认过可见性，这里不再 wait_for。Element UI 的
-        # 工具栏会反复重渲染，重复等待时 Playwright 会报"resolved to visible"却仍然
-        # 超时（2026-08-16 21:10 那轮就挂在这里），等于凭空多一个失败点。
-        if not locator.is_enabled(timeout=5_000):
-            raise TmsDownloadError(f"页面按钮不可用: {name}")
-        # 李宁 TMS 是 SPA，Playwright 的鼠标点击偶发卡在 actionability 或
-        # 导航等待。元素已确认可见且可用后触发 DOM click，再由后续业务状态
-        # 判断点击是否真正生效。
-        locator.evaluate("element => element.click()")
-
-    @classmethod
-    def _click_visible_text(cls, page: object, text: str, *, force: bool = False) -> None:
-        deadline = time.monotonic() + cls._ELEMENT_WAIT_SECONDS
-        candidate = cls._find_visible(
-            page, [page.get_by_text(text, exact=True)], deadline
-        )
-        if candidate is None:
-            raise TmsDownloadError(f"页面未找到可见元素: {text}")
-        if force:
-            # TMS 的成功提示层可能长期覆盖菜单。这里直接触发已确认可见菜单元素的
-            # DOM click，避免覆盖层截获鼠标事件。
-            candidate.evaluate("element => element.click()")
-        else:
-            candidate.click()
+    def _escape_attribute(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
