@@ -129,7 +129,21 @@ docker --version
 docker compose version
 ```
 
-服务器不需要开放入站端口。构建时需要访问 PyPI 和浏览器下载源；运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
+服务器不需要开放入站端口。运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
+
+构建时需要访问的是 Docker registry 和 PyPI/APT，**不需要**访问 Playwright 的浏览器下载源 —— 浏览器是从官方镜像 `mcr.microsoft.com/playwright/python` 按分层复制进来的。默认已按国内网络配好：
+
+| build arg | 默认值 | 覆盖方式 |
+|---|---|---|
+| `PLAYWRIGHT_IMAGE` | `mcr.microsoft.com/playwright/python:v1.62.0-noble` | 换国内 registry 镜像 |
+| `PIP_INDEX` | 阿里云 ECS 内网 PyPI 源 | 置空回上游 |
+| `APT_MIRROR` | 阿里云 ECS 内网 Debian 源 | 置空回上游 |
+
+三个都可以用同名环境变量覆盖（`compose.yaml` 会透传），在阿里云之外构建时置空即可：
+
+```bash
+APT_MIRROR= PIP_INDEX= docker compose build app
+```
 
 ### 使用 GitHub Actions 部署（推荐）
 

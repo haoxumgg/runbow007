@@ -25,6 +25,30 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert app["mem_limit"] == "1200m"
 
 
+def test_browsers_come_from_the_playwright_image_not_the_zip_cdn():
+    """浏览器必须来自 Playwright 官方镜像，不能再走 zip 下载。
+
+    2026-08-19 实测：cdn.playwright.dev 会 307 到 Azure 签名 URL，从广州拉经常
+    断，而 Playwright 自己的 socket 超时只有 30 秒（NET_DEFAULT_TIMEOUT = 3e4），
+    抖一下就整个中止；唯一的国内镜像 npmmirror 在 1.62.0 锁定的 revision 1234 上
+    只同步了 arm64，x64 是 404。改从官方镜像按 Docker 分层取，那条通道在目标服务
+    器上是通的。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY --from=browsers /ms-playwright /ms-playwright" in dockerfile
+    # 只装系统依赖，绝不能再触发浏览器下载。
+    assert "playwright install-deps chromium" in dockerfile
+    assert "playwright install --with-deps" not in dockerfile
+    assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" in dockerfile
+    # firefox/webkit 必须在来源层就删掉：COPY 是独立分层，下游删减不掉体积。
+    firefox_at = dockerfile.index("rm -rf /ms-playwright/firefox-*")
+    copy_at = dockerfile.index("COPY --from=browsers")
+    assert firefox_at < copy_at, "必须在 COPY 之前裁掉用不到的浏览器"
+    # 构建期就验证浏览器真的能被解析到，别等到线上才发现。
+    assert "executable_path" in dockerfile
+
+
 def test_build_sources_are_overridable_mirrors():
     """构建源必须是可覆盖的 build arg，不能写死。
 
@@ -37,12 +61,7 @@ def test_build_sources_are_overridable_mirrors():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     build_args = compose["services"]["app"]["build"]["args"]
 
-    for arg in (
-        "APT_MIRROR",
-        "PIP_INDEX",
-        "PLAYWRIGHT_MIRROR",
-        "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
-    ):
+    for arg in ("PLAYWRIGHT_IMAGE", "APT_MIRROR", "PIP_INDEX"):
         assert f"ARG {arg}" in dockerfile, f"Dockerfile 缺少 {arg}"
         assert arg in build_args, f"compose 没有透传 {arg}"
         # 留空表示「有同名环境变量就透传」，默认值不能在 compose 里再写一遍。
@@ -50,12 +69,6 @@ def test_build_sources_are_overridable_mirrors():
 
     # 内网源只有 http，缺了 trusted-host pip 会直接拒绝。
     assert "--trusted-host" in dockerfile
-    # npmmirror 对 playwright 1.62.0 锁定的 chromium revision 1234 只同步了 arm64，
-    # x64 直接 404，默认必须留空走上游，不能给一个会 404 的默认值。
-    assert "ARG PLAYWRIGHT_MIRROR=\n" in dockerfile
-    # Playwright 自己的 socket 超时只有 30 秒（NET_DEFAULT_TIMEOUT = 3e4），跨境
-    # 下载抖一下就中止整个下载，必须放宽。
-    assert "ARG PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000" in dockerfile
 
 
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():

@@ -1,3 +1,20 @@
+# 浏览器的来源。Playwright 自己那套 zip 下载在国内不可用：cdn.playwright.dev 会
+# 307 到 Azure 签名 URL，从广州拉经常断；唯一的国内镜像 npmmirror 在 1.62.0 锁定的
+# revision 1234 上只同步了 arm64，x64 的 chromium-linux.zip 是 404、
+# chromium-headless-shell/1234/ 更是空目录（2026-08-19 实测）。
+#
+# 所以改走 Docker registry：官方镜像里已经装好了和 1.62.0 完全匹配的
+# chromium(1234)、chromium-headless-shell(1234) 和 ffmpeg(1011)。这条通道在目标
+# 服务器上已经验证可用（python:3.12-slim-bookworm 就是这么拉下来的），而且分层
+# 可续传、不受 Playwright 那个 30 秒 socket 超时影响。
+# 需要换国内 registry 镜像时覆盖这个参数即可，例如 --build-arg PLAYWRIGHT_IMAGE=<mirror>/playwright/python:v1.62.0-noble
+ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright/python:v1.62.0-noble
+
+FROM ${PLAYWRIGHT_IMAGE} AS browsers
+# 官方镜像还带着 firefox 和 webkit，本项目只用 chromium。必须在这一层就删掉：
+# COPY 是独立分层，等复制过去再删是减不掉体积的。
+RUN rm -rf /ms-playwright/firefox-* /ms-playwright/webkit-*
+
 FROM python:3.12-slim-bookworm
 
 # 构建期镜像源。服务器在广州，直连 deb.debian.org / pypi.org 慢到会把构建拖垮：
@@ -9,29 +26,19 @@ FROM python:3.12-slim-bookworm
 ARG APT_MIRROR=mirrors.cloud.aliyuncs.com
 # 内网源只有 http，所以下面会自动为它补一个 --trusted-host，否则 pip 直接拒绝。
 ARG PIP_INDEX=http://mirrors.cloud.aliyuncs.com/pypi/simple/
-# Playwright 的浏览器二进制默认走上游 cdn.playwright.dev（这也是驱动里写死的默认
-# 值）。阿里云不镜像它；npmmirror 虽然有 1.62.0 锁定的 revision 1234 目录，但
-# 2026-08-19 实测里面只同步了 arm64，x64 的 chromium-linux.zip 是 404，
-# chromium-headless-shell/1234/ 干脆是空目录。所以这里不设默认镜像——宁可慢，也不
-# 给一个必然 404 的默认值。将来确认某个镜像站同步全了，用 PLAYWRIGHT_MIRROR=<host>
-# 覆盖即可（会被设成 PLAYWRIGHT_DOWNLOAD_HOST）。
-ARG PLAYWRIGHT_MIRROR=
-# Playwright 下载浏览器时的 socket 超时，单位毫秒。它自己的默认值是
-# NET_DEFAULT_TIMEOUT = 3e4，也就是连续 30 秒没收到数据就中止整个下载——从广州拉
-# Azure CDN 抖动一下就会超，表现正是「卡在 playwright 下载」然后失败。放宽到 5 分钟，
-# 慢没关系，别因为一次抖动前功尽弃。ARG 会自动作为环境变量暴露给下面的 RUN。
-ARG PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     TZ=Asia/Shanghai
 
 WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
+COPY --from=browsers /ms-playwright /ms-playwright
 
 RUN set -eux; \
     if [ -n "$APT_MIRROR" ]; then \
@@ -48,10 +55,8 @@ RUN set -eux; \
     fi; \
     python -m pip install --upgrade $pip_args pip; \
     python -m pip install $pip_args .; \
-    if [ -n "$PLAYWRIGHT_MIRROR" ]; then \
-        export PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_MIRROR"; \
-    fi; \
-    python -m playwright install --with-deps chromium; \
+    python -m playwright install-deps chromium; \
+    python -c "import playwright.sync_api as api; pw = api.sync_playwright().start(); print('chromium ->', pw.chromium.executable_path); pw.stop()"; \
     rm -rf /var/lib/apt/lists/*; \
     useradd --create-home --user-group --uid 10001 \
         --shell /usr/sbin/nologin runbow007; \
