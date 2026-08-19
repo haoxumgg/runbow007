@@ -52,6 +52,13 @@ export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 # 安装 Docker CE 的部分），这里不引入新的来源。置空可退回 Debian 官方源。
 export RUNBOW007_APT_MIRROR="${RUNBOW007_APT_MIRROR-mirrors.cloud.aliyuncs.com}"
 
+# 浏览器二进制同样走国内镜像。apt 提速后瓶颈整个落在这里：2026-08-19 实测
+# cdn.playwright.dev 只有约 86 KB/s，184MB 的 chromium 下 430 秒才到 20%。
+# 与 apt 镜像不同，npmmirror 是本项目此前没有用过的来源，属于新增供应链依赖，
+# 因此 Dockerfile 里做了自动回退：镜像取不到就退回 Playwright 官方源。
+# 置空可完全禁用镜像。
+export RUNBOW007_PLAYWRIGHT_DOWNLOAD_HOST="${RUNBOW007_PLAYWRIGHT_DOWNLOAD_HOST-https://cdn.npmmirror.com/binaries/playwright}"
+
 # 构建必须有上限。缓存命中时这一步是秒级，需要重新下载 Playwright 浏览器时才会
 # 变长——而这台服务器到 cdn.playwright.dev 的吞吐随时段剧烈波动：2026-08-18
 # 15:53 全部下完只用了 165 秒，同日 18:00 起实测只有约 0.1 MB/s，300MB 根本不可能

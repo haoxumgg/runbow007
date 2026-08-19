@@ -32,11 +32,25 @@ RUN set -eu; \
       done; \
     fi
 
+# 浏览器二进制的下载源。留空 = Playwright 官方 CDN。
+# 这台服务器到 cdn.playwright.dev 实测只有约 86 KB/s（184MB 的 chromium 下了
+# 430 秒才到 20%），单靠 apt 提速救不回来。传入镜像时先试镜像、失败自动回退官方源，
+# 所以镜像路径万一对不上，最坏也只是退回原来的行为，不会更糟。
+ARG PLAYWRIGHT_DOWNLOAD_HOST=""
 ARG PLAYWRIGHT_VERSION=1.62.0
-RUN python -m pip install --upgrade pip \
-    && python -m pip install "playwright==${PLAYWRIGHT_VERSION}" \
-    && python -m playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    python -m pip install --upgrade pip; \
+    python -m pip install "playwright==${PLAYWRIGHT_VERSION}"; \
+    python -m playwright install-deps chromium; \
+    if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST}" ]; then \
+      echo "浏览器下载源: ${PLAYWRIGHT_DOWNLOAD_HOST}"; \
+      PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}" \
+        python -m playwright install chromium \
+      || { echo "镜像不可用，回退官方源"; python -m playwright install chromium; }; \
+    else \
+      python -m playwright install chromium; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src

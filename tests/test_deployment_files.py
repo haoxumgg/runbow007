@@ -191,6 +191,24 @@ def test_actions_deploy_can_bootstrap_docker_on_ubuntu_2404():
 
 
 
+def test_playwright_mirror_falls_back_to_the_official_host():
+    """镜像是新增的供应链来源，必须能自动退回官方源。
+
+    2026-08-19 实测 cdn.playwright.dev 只有约 86 KB/s，184MB 的 chromium 下了
+    430 秒才到 20%，构建预算耗尽。镜像路径万一对不上，最坏也只能退回原行为。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    assert 'ARG PLAYWRIGHT_DOWNLOAD_HOST=""' in dockerfile, "默认必须走官方源"
+    assert "回退官方源" in dockerfile, "镜像失败必须能退回官方源"
+    # 镜像失败不能让整条 RUN 挂掉，必须由 || 接住。
+    assert "|| { echo \"镜像不可用" in dockerfile
+    assert "PLAYWRIGHT_DOWNLOAD_HOST: ${RUNBOW007_PLAYWRIGHT_DOWNLOAD_HOST:-}" in compose
+    assert "npmmirror.com" in deploy
+
+
 def test_dockerfile_installs_browsers_before_copying_source():
     """浏览器层必须在源码之前，否则改一行代码就要重下约 300MB。
 
