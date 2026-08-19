@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import signal
@@ -8,7 +9,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 from zoneinfo import ZoneInfo
@@ -42,8 +43,11 @@ class DownloadResult:
 class _ExportState:
     """What survives across retries within one run."""
 
-    # 点导出前下载中心已有的最大任务 id。本轮任务就是"id 比它大"的那个。
+    # 点导出前下载中心已有的最大任务 id，用作"比它新"的下界。
     baseline_id: int | None = None
+    # 点"确定"的那一刻。下载中心是全公司共享队列，光靠 id 更大认不出是不是自己的，
+    # 还要求任务的开始时间落在这一刻附近。
+    confirmed_at: datetime | None = None
     expected_total: int | None = None
     task_created: bool = False
     budget_deadline: float | None = None
@@ -77,6 +81,20 @@ def _export_id(href: str | None) -> int | None:
         return int(values[0])
     except (IndexError, ValueError):
         return None
+
+
+def _first_timestamp(cells: list[str]) -> datetime | None:
+    """The task start time as the download centre renders it (local, no timezone)."""
+    for cell in cells:
+        found = re.search(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})", cell)
+        if found:
+            try:
+                return datetime.strptime(
+                    found.group(1).replace("T", " "), "%Y-%m-%d %H:%M"
+                )
+            except ValueError:
+                continue
+    return None
 
 
 def _detect_suffix(body: bytes) -> str | None:
@@ -248,6 +266,8 @@ class TmsDownloader:
 
                     step.enter("点击导出并确认")
                     self._click_export(page)
+                    # 归属判据之一，必须在点完"确定"的当下取。
+                    state.confirmed_at = self._local_now()
                     state.task_created = True
                     logger.info("导出任务已创建，进入下载中心等待生成")
 
@@ -470,9 +490,8 @@ class TmsDownloader:
     def _export_links(self, page: object) -> dict[int, str]:
         """Map every download-center export file to its task id.
 
-        直接读 <a href> 而不是去匹配表格行：Element UI 的固定列会把 tbody 复制成多份，
-        含任务名的行和含下载图标的行经常不是同一个 tr，按行匹配会莫名其妙地找不到链接。
-        链接只在任务生成完毕后才渲染，所以"链接存在"本身就等于"任务已完成"。
+        只用来拍基线：需要的仅仅是"现在最大的 id 是多少"，扫链接最便宜。
+        链接只在任务生成完毕后才渲染，所以"链接存在"就等于"任务已完成"。
         """
         try:
             hrefs = page.locator(self.config.tms.selectors.export_link).evaluate_all(
@@ -486,6 +505,66 @@ class TmsDownloader:
             if export_id is not None:
                 links[export_id] = href
         return links
+
+    def _export_rows(self, page: object) -> list[dict]:
+        """Read the download-center rows with enough context to identify our own task.
+
+        下载中心是**全公司共享队列**，别人的导出会插在我们前后。所以要连同功能列和
+        开始时间一起读出来，光有 id 认不出归属。链接和单元格取自同一个 tr，避免
+        Element UI 固定列复制 tbody 造成的错位。
+        """
+        link_selector = self.config.tms.selectors.export_link
+        expression = (
+            "nodes => nodes.map(node => {"
+            f"  const link = node.querySelector({json.dumps(link_selector)});"
+            "  return {"
+            "    href: link ? link.getAttribute('href') : null,"
+            "    cells: Array.from(node.querySelectorAll('td'))"
+            "      .map(cell => (cell.innerText || '').trim())"
+            "      .filter(text => text),"
+            "  };"
+            "})"
+        )
+        try:
+            return page.locator(
+                self.config.tms.selectors.download_row
+            ).evaluate_all(expression)
+        except Exception:
+            return []
+
+    def _match_export(
+        self, rows: list[dict], state: _ExportState
+    ) -> tuple[int | None, str | None]:
+        """Pick the row that is *our* export, not somebody else's.
+
+        三个条件缺一不可：id 比基线新、功能列是集团订单管理的导出、开始时间落在我们
+        点"确定"的前后容差内。之前只用第一条，而下载中心是全公司共享的——2026-08-19
+        实测基线 815451 到本轮任务 815458 之间隔了 7 个 id，那几十秒里别人也在导出，
+        "取最大的新 id"随时可能拿到别人的文件。
+        """
+        baseline = state.baseline_id or 0
+        task_name = self.config.tms.export_task_name
+        window = timedelta(minutes=self.config.tms.export_match_window_minutes)
+        best_id: int | None = None
+        best_href: str | None = None
+        for row in rows:
+            href = row.get("href")
+            export_id = _export_id(href)
+            if export_id is None or export_id <= baseline:
+                continue
+            cells = row.get("cells") or []
+            if task_name and not any(task_name in cell for cell in cells):
+                continue
+            if state.confirmed_at is not None:
+                started_at = _first_timestamp(cells)
+                # 认不出开始时间就不敢认领：宁可再等一轮，也好过下错文件。
+                if started_at is None:
+                    continue
+                if abs(started_at - state.confirmed_at) > window:
+                    continue
+            if best_id is None or export_id > best_id:
+                best_id, best_href = export_id, href
+        return best_id, best_href
 
     def _await_export(self, page: object, state: _ExportState) -> str:
         """Poll the download centre until a task newer than the baseline shows up.
@@ -503,24 +582,37 @@ class TmsDownloader:
             wait_seconds = min(wait_seconds, max(budget, 60.0))
         deadline = time.monotonic() + wait_seconds
         refresh = self.config.tms.selectors.refresh_button
-        seen = -1
+        seen: list[int] | None = None
 
         while True:
-            links = self._export_links(page)
-            fresh = [export_id for export_id in links if export_id > baseline]
-            if fresh:
-                newest = max(fresh)
-                logger.info("下载中心出现本轮导出文件 id=%s（基线 %s）", newest, baseline)
-                return links[newest]
-            newest_seen = max(links, default=0)
-            if newest_seen != seen:
+            rows = self._export_rows(page)
+            matched_id, matched_href = self._match_export(rows, state)
+            if matched_href:
                 logger.info(
-                    "下载中心暂无新文件：现有 %s 个，最大 id=%s，等待 id>%s",
-                    len(links),
-                    newest_seen,
+                    "认领本轮导出文件 id=%s（基线 %s，确定时刻 %s）",
+                    matched_id,
                     baseline,
+                    state.confirmed_at,
                 )
-                seen = newest_seen
+                return matched_href
+            fresh = sorted(
+                export_id
+                for export_id in (_export_id(row.get("href")) for row in rows)
+                if export_id is not None and export_id > baseline
+            )
+            if fresh != seen:
+                # 有更新的 id 却没匹配上，多半是别人的导出——把它记下来，
+                # 这正是"共享队列"的现场证据。
+                logger.info(
+                    "下载中心 %s 行，比基线 %s 新的 id=%s，"
+                    "均不满足本轮特征（%s + 确定时刻±%s 分钟）",
+                    len(rows),
+                    baseline,
+                    fresh or "无",
+                    self.config.tms.export_task_name,
+                    self.config.tms.export_match_window_minutes,
+                )
+                seen = fresh
             if time.monotonic() >= deadline:
                 raise TmsExportTaskNotFound(
                     f"点击导出后 {wait_seconds:.0f} 秒内，下载中心未出现新的导出文件"

@@ -29,6 +29,10 @@ tms:
   attempt_timeout_seconds: 900
   # 页面总数与 Excel 唯一订单数比对时允许的漂移（读页面到真正导出之间订单还在增减）。
   total_tolerance: 10
+  # 下载中心是全公司共享队列。认领本轮任务除了"id 比基线新"，还要求功能列匹配、
+  # 且任务开始时间落在点「确定」的前后这么多分钟内，避免拿到别人的导出。
+  export_task_name: maintainCompanyOrderPage
+  export_match_window_minutes: 5
   current_month_preset: AI导出数据（勿动）
   # 李宁 TMS 中配置好历史未完结查询后再填写。
   open_carryover_preset: ""
@@ -56,6 +60,8 @@ tms:
     # 下载中心的导出文件链接。href 上的 id 自增，用来判断哪个任务是本轮新建的。
     # Dowload 是 TMS 自己的拼写，不是笔误。
     export_link: "a[href*='exportFileDowload']"
+    # 下载中心的任务行：链接、功能列、开始时间必须取自同一个 tr。
+    download_row: "table.el-table__body tr.el-table__row"
     refresh_button: "#refreshItem:visible"
 
 feishu:

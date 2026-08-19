@@ -58,6 +58,8 @@ class TmsSelectors:
     # 下载中心里的导出文件链接。href 上的 id 自增，是判断"这个任务是不是本轮新建的"
     # 唯一可靠依据。注意 Dowload 是 TMS 自己的拼写。
     export_link: str = "a[href*='exportFileDowload']"
+    # 下载中心的任务行。链接和功能列、开始时间必须取自同一个 tr。
+    download_row: str = "table.el-table__body tr.el-table__row"
     refresh_button: str = "#refreshItem:visible"
 
 
@@ -72,6 +74,10 @@ class TmsConfig:
     grid_load_timeout_seconds: int = 180
     attempt_timeout_seconds: int = 900
     total_tolerance: int = 10
+    # 下载中心是全公司共享队列，别人的导出会插在我们前后。认领本轮任务除了"id 比
+    # 基线新"，还要求功能列是集团订单管理的导出、且开始时间落在点"确定"的前后容差内。
+    export_task_name: str = "maintainCompanyOrderPage"
+    export_match_window_minutes: int = 5
     current_month_preset: str = "AI导出数据（勿动）"
     open_carryover_preset: str = ""
     selectors: TmsSelectors = field(default_factory=TmsSelectors)
@@ -175,6 +181,8 @@ class AppConfig:
             raise ConfigError("tms.download_timeout_seconds 必须在 60 到 1800 之间")
         if not 0 <= self.tms.total_tolerance <= 1000:
             raise ConfigError("tms.total_tolerance 必须在 0 到 1000 之间")
+        if not 1 <= self.tms.export_match_window_minutes <= 60:
+            raise ConfigError("tms.export_match_window_minutes 必须在 1 到 60 之间")
         if not 10 <= self.tms.grid_load_timeout_seconds <= 900:
             raise ConfigError("tms.grid_load_timeout_seconds 必须在 10 到 900 之间")
         if self.tms.attempt_timeout_seconds and not (

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -28,10 +28,11 @@ HTML = b"<!DOCTYPE html><html><body>\xe4\xbc\x9a\xe8\xaf\x9d\xe5\xb7\xb2\xe8\xbf
 class _Element:
     """A stand-in for one DOM node behind a Playwright locator."""
 
-    def __init__(self, *, visible=True, text="", href=None, on_click=None):
+    def __init__(self, *, visible=True, text="", href=None, cells=None, on_click=None):
         self.visible = visible
         self.text = text
         self.href = href
+        self.cells = list(cells or [])
         self.on_click = on_click
         self.clicks = 0
         self.filled = None
@@ -115,6 +116,12 @@ class _Locator:
         return _Locator([item for item in self._elements if has_text in item.text])
 
     def evaluate_all(self, expression):
+        if "querySelectorAll('td')" in expression:
+            # 下载中心任务行：链接和单元格取自同一个 tr。
+            return [
+                {"href": item.href, "cells": list(item.cells)}
+                for item in self._elements
+            ]
         if "getAttribute('href')" in expression:
             return [item.href for item in self._elements]
         assert "innerText" in expression
@@ -652,43 +659,89 @@ def test_export_links_map_task_ids_to_hrefs(app_config):
     }
 
 
-def test_await_export_returns_the_task_created_after_the_baseline(app_config, monkeypatch):
-    """比基线更新的那个才是本轮的产物；老任务永远不会被误领。"""
+CONFIRMED = datetime(2026, 8, 19, 10, 30)
+
+
+def _task_row(export_id, *, minutes=0, task="maintainCompanyOrderPage"):
+    """一行下载中心任务：链接 + 功能列 + 开始时间。"""
+    started = CONFIRMED + timedelta(minutes=minutes)
+    return _Element(
+        href=f"/e?id={export_id}",
+        cells=[task, started.strftime("%Y-%m-%d %H:%M"), "成功"],
+    )
+
+
+def test_await_export_claims_our_own_task(app_config):
+    """比基线新、功能列对得上、开始时间贴着"确定"那一刻的，才是我们的。"""
     selectors = app_config.tms.selectors
-    rounds = [
-        [_Element(href="/e?id=34920")],
-        [_Element(href="/e?id=34920")],
-        [_Element(href="/e?id=34920"), _Element(href="/e?id=34922")],
-    ]
+    rounds = [[], [], [_task_row(34922)]]
     page = _Page(
         {
             selectors.download_center_menu: [_Element()],
             selectors.refresh_button: [_Element()],
-            selectors.export_link: lambda: rounds.pop(0) if len(rounds) > 1 else rounds[0],
+            selectors.download_row: lambda: rounds.pop(0) if len(rounds) > 1 else rounds[0],
         }
     )
-    state = _ExportState(baseline_id=34920)
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
 
-    href = TmsDownloader(app_config)._await_export(page, state)
-
-    assert href == "/e?id=34922"
+    assert TmsDownloader(app_config)._await_export(page, state) == "/e?id=34922"
 
 
-def test_await_export_times_out_into_a_reexport(app_config, monkeypatch):
+def test_await_export_ignores_somebody_elses_export(app_config, monkeypatch):
+    """下载中心是全公司共享队列：id 更新但不是我们导的，绝不能拿。
+
+    2026-08-19 实测基线 815451 到本轮任务 815458 之间隔了 7 个 id，那几十秒里
+    别人也在导出——"取最大的新 id"随时会下错文件。
+    """
     selectors = app_config.tms.selectors
     page = _Page(
         {
             selectors.download_center_menu: [_Element()],
             selectors.refresh_button: [_Element()],
-            selectors.export_link: [_Element(href="/e?id=34920")],
+            selectors.download_row: [
+                # 功能列是别的模块
+                _task_row(34925, task="maintainCarrierPage"),
+                # 功能列对，但开始时间离"确定"太远，是别人早先排的队
+                _task_row(34926, minutes=-30),
+            ],
         }
     )
     app_config.tms.download_timeout_seconds = 60
-    clock = iter([0.0] + [float(step) * 30 for step in range(1, 50)])
+    clock = iter([0.0] + [float(step) * 30 for step in range(1, 60)])
     monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(clock))
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
 
-    with pytest.raises(TmsExportTaskNotFound, match="未出现新的导出文件"):
-        TmsDownloader(app_config)._await_export(page, _ExportState(baseline_id=34920))
+    with pytest.raises(TmsExportTaskNotFound):
+        TmsDownloader(app_config)._await_export(page, state)
+
+
+def test_match_export_requires_a_readable_start_time(app_config):
+    """认不出开始时间就不认领：宁可再等一轮，也好过下错文件。"""
+    rows = [{"href": "/e?id=34925", "cells": ["maintainCompanyOrderPage", "成功"]}]
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
+
+    assert TmsDownloader(app_config)._match_export(rows, state) == (None, None)
+
+
+def test_match_export_takes_the_newest_of_several_of_ours(app_config):
+    """上一次尝试留下的任务也符合特征时，取最新的那个。"""
+    rows = [
+        {"href": r.href, "cells": r.cells} for r in (_task_row(34922), _task_row(34924))
+    ]
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
+
+    assert TmsDownloader(app_config)._match_export(rows, state) == (
+        34924,
+        "/e?id=34924",
+    )
+
+
+def test_match_export_skips_the_time_window_before_the_click(app_config):
+    """还没点"确定"就没有时间基准，此时只按 id 和功能列筛，不能全盘拒绝。"""
+    rows = [{"href": r.href, "cells": r.cells} for r in (_task_row(34922, minutes=-99),)]
+    state = _ExportState(baseline_id=34920, confirmed_at=None)
+
+    assert TmsDownloader(app_config)._match_export(rows, state)[0] == 34922
 
 
 def test_await_export_window_is_clamped_to_the_remaining_budget(app_config, monkeypatch):
@@ -698,7 +751,7 @@ def test_await_export_window_is_clamped_to_the_remaining_budget(app_config, monk
         {
             selectors.download_center_menu: [_Element()],
             selectors.refresh_button: [_Element()],
-            selectors.export_link: [],
+            selectors.download_row: [],
         }
     )
     app_config.tms.download_timeout_seconds = 600
