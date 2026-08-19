@@ -72,7 +72,7 @@ def test_downloader_uses_configured_timezone():
 def test_download_retries_then_succeeds(app_config, monkeypatch):
     downloader = TmsDownloader(app_config)
     expected = DownloadResult(Path("orders.xls"), 10, "current_month")
-    outcomes = [RuntimeError("temporary"), RuntimeError("temporary"), expected]
+    outcomes = [RuntimeError("temporary"), expected]
     sleeps = []
 
     attempts = []
@@ -91,9 +91,11 @@ def test_download_retries_then_succeeds(app_config, monkeypatch):
     monkeypatch.setattr("runbow007.downloader.time.sleep", sleeps.append)
 
     assert downloader.download() == expected
-    assert sleeps == [60, 180]
-    assert attempts[0][0] is attempts[1][0] is attempts[2][0]
-    assert attempts[1][1:] == attempts[2][1:] == (4177, True)
+    assert sleeps == [60]
+    # 同一个 _ExportState 贯穿整轮：第一次尝试认下的总数和已创建的导出任务
+    # 必须被第二次沿用，否则重试会重新点一遍导出。
+    assert attempts[0][0] is attempts[1][0]
+    assert attempts[1][1:] == (4177, True)
 
 
 def test_download_reexports_when_created_task_never_appears(app_config, monkeypatch):
@@ -395,7 +397,7 @@ def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, 
     assert calls == 1
 
 
-def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
+def test_download_normalizes_repeated_browser_failures(app_config, monkeypatch):
     downloader = TmsDownloader(app_config)
     monkeypatch.setattr(
         downloader,
@@ -404,7 +406,7 @@ def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
     )
     monkeypatch.setattr("runbow007.downloader.time.sleep", lambda seconds: None)
 
-    with pytest.raises(TmsDownloadError, match="连续 3 次失败: browser"):
+    with pytest.raises(TmsDownloadError, match="连续 2 次失败: browser"):
         downloader.download("open_carryover")
 
 

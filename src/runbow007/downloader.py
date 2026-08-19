@@ -84,11 +84,13 @@ class TmsDownloader:
     _QUICK_PROBE_MS = 250
     _PATIENT_PROBE_MS = 15_000
     _ELEMENT_WAIT_SECONDS = 60
-    _RETRY_DELAYS = (0, 60, 180)
-    # The hourly timer fires every 60 minutes and a second run is refused by the file
-    # lock, so a single run must never spend a whole hour retrying: it would silently
-    # eat the next slot. Give up on further attempts once the budget is spent.
-    _RUN_BUDGET_SECONDS = 50 * 60
+    _RETRY_DELAYS = (0, 60)
+    # 调度间隔是 30 分钟，同一时刻的第二轮会被文件锁直接拒掉，所以单轮绝不能把整个
+    # 间隔耗光，否则下一个 slot 会被静默吃掉。25 分钟预算 = 2 次尝试 × 12 分钟硬上限
+    # + 60 秒退避，正好落在间隔内并留 5 分钟余量。
+    # 从 3 次重试降到 2 次并不损失覆盖：间隔从 60 分钟减半之后，每小时的总尝试次数
+    # 反而由 3 次变成 4 次，把重试的担子交给下一个 slot 比在本轮里死等更划算。
+    _RUN_BUDGET_SECONDS = 25 * 60
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -105,7 +107,7 @@ class TmsDownloader:
                 remaining = self._budget_remaining(state)
                 if remaining is not None and remaining <= delay:
                     logger.error(
-                        "本轮下载预算仅剩 %.0f 秒，放弃第 %s 次重试，避免占用下一个整点",
+                        "本轮下载预算仅剩 %.0f 秒，放弃第 %s 次重试，避免占用下一个 slot",
                         max(remaining, 0.0),
                         attempt,
                     )

@@ -1,6 +1,10 @@
+import re
 from pathlib import Path
 
 import yaml
+
+from runbow007.config import TmsConfig
+from runbow007.downloader import TmsDownloader
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,7 +30,7 @@ def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
     hourly = (timer_dir / "runbow007-hourly.timer").read_text(encoding="utf-8")
     arrival = (timer_dir / "runbow007-arrival.timer").read_text(encoding="utf-8")
 
-    assert "*:05:00 Asia/Shanghai" in hourly
+    assert "*:05,35:00 Asia/Shanghai" in hourly
     assert "13:30:00 Asia/Shanghai" in arrival
     assert "Persistent=true" in hourly
     assert "Persistent=true" in arrival
@@ -43,9 +47,9 @@ def test_systemd_jobs_allow_full_download_window_and_alert_on_failure():
 
     for name in ("runbow007-hourly.service", "runbow007-arrival.service"):
         service = (timer_dir / name).read_text(encoding="utf-8")
-        # 必须小于每小时一次的调度间隔：卡死的一轮要在下一个整点之前被收掉，
+        # 必须小于 30 分钟的调度间隔：卡死的一轮要在下一个 slot 之前被收掉，
         # 否则下一轮只会撞上文件锁然后静默跳过。
-        assert "TimeoutStartSec=55min" in service
+        assert "TimeoutStartSec=28min" in service
         assert "SuccessExitStatus=3" in service
         assert "OnFailure=runbow007-failure@%n.service" in service
 
@@ -56,6 +60,43 @@ def test_systemd_jobs_allow_full_download_window_and_alert_on_failure():
     assert "RUNBOW007_ENABLE_SENDING" in failure_script
     assert "notify-failure" in failure_script
     assert "runbow007-failure@.service" in deploy_script
+
+
+def test_run_budget_and_unit_timeout_stay_inside_the_timer_interval():
+    """必须始终满足：单轮下载预算 < systemd 超时 < 调度间隔。
+
+    这三个数分别写在 downloader.py、.service 和 .timer 里，改任何一个都可能
+    让慢的一轮盖住下一个 slot。而第二轮撞上文件锁只会以退出码 3 静默跳过
+    （SuccessExitStatus=3），监控上完全看不出来，所以在这里锁死。
+    """
+    timer = (ROOT / "deploy" / "systemd" / "runbow007-hourly.timer").read_text(
+        encoding="utf-8"
+    )
+    fire_minutes = re.search(r"OnCalendar=\*-\*-\* \*:([\d,]+):00", timer).group(1)
+    minutes = sorted(int(value) for value in fire_minutes.split(","))
+    assert len(minutes) == 2, "每小时两次触发才构成 30 分钟间隔"
+    interval_seconds = (minutes[1] - minutes[0]) * 60
+    assert interval_seconds == 30 * 60
+
+    assert TmsDownloader._RUN_BUDGET_SECONDS < interval_seconds
+
+    for name in ("runbow007-hourly.service", "runbow007-arrival.service"):
+        service = (ROOT / "deploy" / "systemd" / name).read_text(encoding="utf-8")
+        timeout = int(re.search(r"TimeoutStartSec=(\d+)min", service).group(1)) * 60
+        assert TmsDownloader._RUN_BUDGET_SECONDS < timeout < interval_seconds
+
+
+def test_retry_schedule_cannot_overrun_the_run_budget():
+    """重试次数 × 单次硬上限 + 退避总和不能超过单轮预算。
+
+    超了的话看门狗还没来得及打断，预算检查就已经把重试全砍掉，配置里写的
+    重试次数就成了假的。
+    """
+    attempts = len(TmsDownloader._RETRY_DELAYS)
+    backoff = sum(TmsDownloader._RETRY_DELAYS)
+    worst_case = attempts * TmsConfig().attempt_timeout_seconds + backoff
+
+    assert worst_case <= TmsDownloader._RUN_BUDGET_SECONDS
 
 
 def test_deploy_reclaims_build_cache_without_failing_the_deploy():

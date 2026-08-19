@@ -1,8 +1,8 @@
 [Unit]
-Description=Run Runbow007 hourly, every day
+Description=Run Runbow007 every 30 minutes, every day
 
 [Timer]
-OnCalendar=*-*-* *:05:00 Asia/Shanghai
+OnCalendar=*-*-* *:05,35:00 Asia/Shanghai
 Persistent=true
 AccuracySec=1min
 Unit=runbow007-hourly.service

@@ -52,7 +52,7 @@ class TmsConfig:
     navigation_timeout_seconds: int = 45
     download_timeout_seconds: int = 600
     grid_load_timeout_seconds: int = 180
-    attempt_timeout_seconds: int = 900
+    attempt_timeout_seconds: int = 720
     export_task_appear_minutes: int = 8
     total_tolerance: int = 10
     current_month_preset: str = "AI导出数据（勿动）"
