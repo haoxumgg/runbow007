@@ -4,6 +4,10 @@ services:
   app:
     build:
       context: .
+      args:
+        # 留空则使用 Debian 官方源；部署脚本会在国内服务器上填入阿里云镜像。
+        APT_MIRROR: ${RUNBOW007_APT_MIRROR:-}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${RUNBOW007_PLAYWRIGHT_DOWNLOAD_HOST:-}
     image: runbow007:local
     init: true
     ipc: host

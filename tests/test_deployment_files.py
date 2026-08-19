@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -188,3 +189,95 @@ def test_actions_deploy_can_bootstrap_docker_on_ubuntu_2404():
     assert "/etc/apt/sources.list.d/docker.sources" in remote_script
     assert "docker-buildx-plugin docker-compose-plugin" in remote_script
 
+
+
+def test_playwright_mirror_falls_back_to_the_official_host():
+    """镜像是新增的供应链来源，必须能自动退回官方源。
+
+    2026-08-19 实测 cdn.playwright.dev 只有约 86 KB/s，184MB 的 chromium 下了
+    430 秒才到 20%，构建预算耗尽。镜像路径万一对不上，最坏也只能退回原行为。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    assert 'ARG PLAYWRIGHT_DOWNLOAD_HOST=""' in dockerfile, "默认必须走官方源"
+    assert "回退官方源" in dockerfile, "镜像失败必须能退回官方源"
+    # 镜像失败不能让整条 RUN 挂掉，必须由 || 接住。
+    assert "|| { echo \"镜像不可用" in dockerfile
+    assert "PLAYWRIGHT_DOWNLOAD_HOST: ${RUNBOW007_PLAYWRIGHT_DOWNLOAD_HOST:-}" in compose
+    assert "npmmirror.com" in deploy
+
+
+def test_dockerfile_installs_browsers_before_copying_source():
+    """浏览器层必须在源码之前，否则改一行代码就要重下约 300MB。
+
+    2026-08-18 的四次部署都因此卡在 Google CDN 上，其中一次重试了 68 分钟，
+    最后被工作流的 75 分钟上限打死。层序反了不会有任何报错，只会变慢和不稳定，
+    所以用测试钉住。
+    """
+    # 只看指令行——注释里也写着这两个字样，按整文件搜会匹配到说明文字。
+    instructions = [
+        line
+        for line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    browsers = next(i for i, line in enumerate(instructions) if "playwright install" in line)
+    source = next(i for i, line in enumerate(instructions) if line.startswith("COPY src"))
+
+    assert browsers < source, "playwright install 必须排在 COPY src 之前"
+
+
+def test_dockerfile_pins_the_same_playwright_as_the_project():
+    """浏览器按版本号存放：Dockerfile 先装的版本一旦和 pyproject 解析出的不一致，
+
+    pip install . 会把 playwright 升级掉，而运行时才会报"可执行文件不存在"。
+    构建期那条断言负责拦住它，这里确保两处版本本来就是一致的。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    pinned = re.search(r"ARG PLAYWRIGHT_VERSION=([\d.]+)", dockerfile)
+    required = re.search(r'"playwright==([\d.]+)"', pyproject)
+
+    assert pinned and required, "两边都必须精确锁定 playwright 版本"
+    assert pinned.group(1) == required.group(1)
+    assert "assert v == '${PLAYWRIGHT_VERSION}'" in dockerfile, "构建期需要校验版本一致"
+
+
+def test_deploy_bounds_the_image_build():
+    """构建必须有上限，否则拉不动浏览器时会一直磨到 GitHub 的 75 分钟作业上限。
+
+    2026-08-18 为此白烧了五次部署，而作业日志要等结束才能下载，期间完全看不出
+    发生了什么。超时要能被识别（timeout 用 124 表示），并说清原因。
+    """
+    script = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+
+    assert "timeout \"$build_timeout_seconds\"" in script
+    assert "build_status=$?" in script, "必须用 `|| status=$?` 取真实退出码"
+    assert "-eq 124" in script, "需要把超时和普通构建失败区分开"
+    # `if ! cmd` 会让 then 分支里的 $? 变成取反后的值，读不到 124。
+    assert "if ! timeout" not in script
+
+
+def test_apt_mirror_is_opt_in_and_wired_through_the_build():
+    """境外 apt 源在这台服务器上只有约 64 KB/s，光装依赖就能吃光构建预算。
+
+    镜像源必须是可选的：Dockerfile 默认不改写，任何网络环境都能构建；
+    国内服务器由部署脚本传入，而且用的是本项目已在使用的阿里云源。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+
+    assert 'ARG APT_MIRROR=""' in dockerfile, "默认必须为空，保持镜像可移植"
+    assert 'if [ -n "${APT_MIRROR}" ]' in dockerfile, "留空时不得改写 apt 源"
+    # bookworm 两种 sources 格式都要覆盖。
+    assert "/etc/apt/sources.list.d/debian.sources" in dockerfile
+    assert "/etc/apt/sources.list" in dockerfile
+
+    assert "APT_MIRROR: ${RUNBOW007_APT_MIRROR:-}" in compose
+    assert "mirrors.cloud.aliyuncs.com" in deploy
+    # 与安装 Docker CE 用的是同一个源，不引入新的来源。
+    bootstrap = (ROOT / "scripts" / "deploy-from-actions.sh").read_text(encoding="utf-8")
+    assert "mirrors.cloud.aliyuncs.com" in bootstrap

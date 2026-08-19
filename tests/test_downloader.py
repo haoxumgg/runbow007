@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -12,19 +12,30 @@ from runbow007.downloader import (
     TmsDownloader,
     TmsDownloadError,
     TmsExportTaskNotFound,
+    _detect_suffix,
+    _export_id,
     _ExportState,
 )
 
+XLSX = b"PK\x03\x04" + b"0" * 64
+XLS = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"0" * 64
+HTML = b"<!DOCTYPE html><html><body>\xe4\xbc\x9a\xe8\xaf\x9d\xe5\xb7\xb2\xe8\xbf\x87\xe6\x9c\x9f"
 
-class Probeable:
-    """Fake locator whose visibility is probed through ``wait_for``.
 
-    Playwright ignores ``is_visible(timeout=...)``, so the downloader probes with
-    ``wait_for(state="visible", timeout=...)`` and treats a timeout as "not visible".
-    """
+# --------------------------------------------------------------------- fakes
 
-    def __init__(self, visible: bool) -> None:
+
+class _Element:
+    """A stand-in for one DOM node behind a Playwright locator."""
+
+    def __init__(self, *, visible=True, text="", href=None, cells=None, on_click=None):
         self.visible = visible
+        self.text = text
+        self.href = href
+        self.cells = list(cells or [])
+        self.on_click = on_click
+        self.clicks = 0
+        self.filled = None
         self.probes: list[int] = []
 
     def wait_for(self, *, state, timeout):
@@ -33,30 +44,177 @@ class Probeable:
         if not self.visible:
             raise TimeoutError("locator not visible")
 
+    def click(self, **kwargs):
+        self._fire()
 
-def test_parse_download_center_row():
-    text = """
-    maintainCompanyOrderPage
-    成功
-    2026-08-06 10:03
-    2026-08-06 10:03
-    1211
-    2665
+    def evaluate(self, expression):
+        assert expression == "element => element.click()"
+        self._fire()
+
+    def _fire(self):
+        if not self.visible:
+            raise TimeoutError("locator not visible")
+        self.clicks += 1
+        if self.on_click is not None:
+            self.on_click()
+
+    def fill(self, value):
+        self.filled = value
+
+    def inner_text(self, **kwargs):
+        return self.text
+
+
+class _Missing:
+    """What a locator resolves to when the selector matches nothing."""
+
+    def wait_for(self, *, state, timeout):
+        raise TimeoutError("no such element")
+
+    def click(self, **kwargs):
+        raise TimeoutError("no such element")
+
+    def evaluate(self, expression):
+        raise TimeoutError("no such element")
+
+    def inner_text(self, **kwargs):
+        raise TimeoutError("no such element")
+
+    def fill(self, value):
+        raise TimeoutError("no such element")
+
+
+class _Locator:
+    """Lazily resolved, like the real thing.
+
+    Playwright 的 locator 每次访问都重新匹配 DOM，代码里也是这么用的（先拿到
+    locator，再在循环里反复探测）。假对象必须同样惰性，否则遮罩之类"会变的东西"
+    在测试里永远停在第一次求值的状态。
     """
 
-    started_at, record_count = TmsDownloader._parse_download_row(text)
+    def __init__(self, source):
+        self._source = source
 
-    assert started_at == datetime(2026, 8, 6, 10, 3)
-    assert record_count == 1211
+    @property
+    def _elements(self):
+        return list(self._source() if callable(self._source) else self._source)
+
+    @property
+    def first(self):
+        found = self._elements
+        return found[0] if found else _Missing()
+
+    @property
+    def last(self):
+        found = self._elements
+        return found[-1] if found else _Missing()
+
+    def count(self):
+        return len(self._elements)
+
+    def filter(self, *, has_text):
+        return _Locator([item for item in self._elements if has_text in item.text])
+
+    def evaluate_all(self, expression):
+        if "querySelectorAll('td')" in expression:
+            # 下载中心任务行：链接和单元格取自同一个 tr。
+            return [
+                {"href": item.href, "cells": list(item.cells)}
+                for item in self._elements
+            ]
+        if "getAttribute('href')" in expression:
+            return [item.href for item in self._elements]
+        assert "innerText" in expression
+        return [item.text.strip() for item in self._elements]
 
 
-def test_parse_incomplete_download_center_row():
-    started_at, record_count = TmsDownloader._parse_download_row(
-        "maintainCompanyOrderPage 处理中"
-    )
+class _Page:
+    """Selector-keyed fake page. Values may be a list or a zero-arg callable."""
 
-    assert started_at is None
-    assert record_count is None
+    def __init__(self, elements=None):
+        self.elements = dict(elements or {})
+        self.gotos: list[str] = []
+        self.waits: list[int] = []
+        self.default_timeout = None
+
+    def locator(self, selector):
+        return _Locator(self.elements.get(selector, []))
+
+    def goto(self, url, *, wait_until):
+        assert wait_until == "domcontentloaded"
+        self.gotos.append(url)
+
+    def wait_for_timeout(self, milliseconds):
+        self.waits.append(milliseconds)
+
+    def wait_for_function(self, expression, *, timeout):
+        return None
+
+    def set_default_timeout(self, timeout):
+        self.default_timeout = timeout
+
+    def screenshot(self, *, path, timeout):
+        Path(path).write_bytes(b"png")
+
+    def content(self):
+        return "<html></html>"
+
+
+class _Response:
+    def __init__(self, body=XLSX, *, ok=True, status=200):
+        self._body = body
+        self.ok = ok
+        self.status = status
+
+    def body(self):
+        return self._body
+
+
+class _Context:
+    def __init__(self, response=None):
+        self.closed = False
+        self.requested: list[str] = []
+        self._response = response or _Response()
+        self.request = SimpleNamespace(get=self._get)
+
+    def _get(self, url, **kwargs):
+        self.requested.append(url)
+        return self._response
+
+    def close(self):
+        self.closed = True
+
+
+# ----------------------------------------------------------------- pure bits
+
+
+@pytest.mark.parametrize(
+    ("href", "expected"),
+    [
+        ("/tms/exportFileDowload?id=34921", 34921),
+        ("exportFileDowload?id=7&name=orders.xlsx", 7),
+        ("https://otb.lining.com/tms/exportFileDowload?name=x&id=12", 12),
+        ("/tms/exportFileDowload", None),
+        ("/tms/exportFileDowload?id=abc", None),
+        (None, None),
+    ],
+)
+def test_export_id_reads_the_task_id_from_the_link(href, expected):
+    assert _export_id(href) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (XLSX, ".xlsx"),
+        (XLS, ".xls"),
+        (HTML, None),
+        (b"", None),
+        (b"%PDF-1.7", None),
+    ],
+)
+def test_detect_suffix_identifies_the_payload_by_magic_bytes(body, expected):
+    assert _detect_suffix(body) == expected
 
 
 def test_downloader_uses_configured_timezone():
@@ -69,52 +227,59 @@ def test_downloader_uses_configured_timezone():
     assert abs((expected - now).total_seconds()) < 5
 
 
+# --------------------------------------------------------------------- retry
+
+
 def test_download_retries_then_succeeds(app_config, monkeypatch):
     downloader = TmsDownloader(app_config)
     expected = DownloadResult(Path("orders.xls"), 10, "current_month")
     outcomes = [RuntimeError("temporary"), RuntimeError("temporary"), expected]
-    sleeps = []
-
     attempts = []
 
     def attempt(dataset, *, state):
-        attempts.append((state, state.expected_total, state.task_created))
+        attempts.append((state, state.expected_total, state.task_created, state.baseline_id))
         if len(attempts) == 1:
             state.expected_total = 4177
             state.task_created = True
+            state.baseline_id = 34920
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
+    sleeps = []
     monkeypatch.setattr(downloader, "_download_once", attempt)
     monkeypatch.setattr("runbow007.downloader.time.sleep", sleeps.append)
 
     assert downloader.download() == expected
     assert sleeps == [60, 180]
+    # 同一个 state 贯穿三次尝试：基线只拍一次，条数和"已建任务"都跟着走。
     assert attempts[0][0] is attempts[1][0] is attempts[2][0]
-    assert attempts[1][1:] == attempts[2][1:] == (4177, True)
+    assert attempts[1][1:] == attempts[2][1:] == (4177, True, 34920)
 
 
-def test_download_reexports_when_created_task_never_appears(app_config, monkeypatch):
+def test_download_reexports_when_no_new_task_ever_appears(app_config, monkeypatch):
     downloader = TmsDownloader(app_config)
     expected = DownloadResult(Path("orders.xls"), 4220, "current_month")
     attempts = []
     sleeps = []
 
     def attempt(dataset, *, state):
-        attempts.append((state.expected_total, state.task_created))
+        attempts.append((state.task_created, state.baseline_id))
         if len(attempts) == 1:
             state.expected_total = 4220
             state.task_created = True
-            raise TmsExportTaskNotFound("no matching task")
+            state.baseline_id = 34920
+            raise TmsExportTaskNotFound("no new export")
         return expected
 
     monkeypatch.setattr(downloader, "_download_once", attempt)
     monkeypatch.setattr("runbow007.downloader.time.sleep", sleeps.append)
 
     assert downloader.download() == expected
-    assert attempts == [(None, False), (4220, False)]
+    # task_created 被重置成 False，下一次重新点导出；基线保持不变，
+    # 万一上一次其实建成了，新的一轮照样能认出它。
+    assert attempts == [(False, None), (False, 34920)]
     assert sleeps == [60]
 
 
@@ -141,13 +306,48 @@ def test_download_gives_up_when_run_budget_is_spent(app_config, monkeypatch):
     assert sleeps == []
 
 
+@pytest.mark.parametrize(
+    "error", [CredentialError("no password"), TmsAuthenticationError("bad password")]
+)
+def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, error):
+    downloader = TmsDownloader(app_config)
+    attempts = []
+
+    def fail(dataset, *, state):
+        attempts.append(dataset)
+        raise error
+
+    monkeypatch.setattr(downloader, "_download_once", fail)
+
+    with pytest.raises(type(error)):
+        downloader.download()
+    assert attempts == ["current_month"]
+
+
+def test_download_reports_the_step_it_died_on(app_config, monkeypatch):
+    downloader = TmsDownloader(app_config)
+
+    def fail(dataset, *, state):
+        state.last_step = "等待下载中心生成文件"
+        raise RuntimeError("browser")
+
+    monkeypatch.setattr(downloader, "_download_once", fail)
+    monkeypatch.setattr("runbow007.downloader.time.sleep", lambda seconds: None)
+
+    with pytest.raises(
+        TmsDownloadError, match="连续 3 次失败，最后卡在「等待下载中心生成文件」: browser"
+    ):
+        downloader.download("open_carryover")
+
+
+# ------------------------------------------------------------------ watchdog
+
+
 def test_attempt_watchdog_interrupts_a_hung_attempt(app_config, monkeypatch):
     """浏览器卡死时，Playwright 超时、循环 deadline、单轮预算全部失效。
 
-    2026-08-17 18:28 一次 page.content() 挂了 70 分钟，把 19:05 那轮也堵掉。
     SIGALRM 由内核投递，不依赖浏览器是死是活。
     """
-    pytest.importorskip("signal")
     import signal as signal_module
 
     if not hasattr(signal_module, "SIGALRM"):
@@ -182,6 +382,9 @@ def test_attempt_watchdog_is_disabled_by_zero(app_config, monkeypatch):
     assert alarms == []
 
 
+# ---------------------------------------------------------------- diagnostics
+
+
 def test_failure_capture_skips_the_dom_when_the_page_is_unresponsive(
     app_config, tmp_path
 ):
@@ -204,244 +407,414 @@ def test_failure_capture_skips_the_dom_when_the_page_is_unresponsive(
 
 
 def test_failure_capture_saves_both_when_the_page_responds(app_config, tmp_path):
-    class LivePage:
-        def screenshot(self, *, path, timeout):
-            Path(path).write_bytes(b"png")
-
-        def content(self):
-            return "<html>frozen grid</html>"
-
-    TmsDownloader(app_config)._capture_failure(LivePage(), "查找导出按钮", tmp_path)
+    TmsDownloader(app_config)._capture_failure(_Page(), "点击导出并确认", tmp_path)
 
     names = sorted(item.name for item in tmp_path.iterdir())
     assert [name.split("-", 2)[2] for name in names] == [
-        "查找导出按钮.html",
-        "查找导出按钮.png",
+        "点击导出并确认.html",
+        "点击导出并确认.png",
     ]
 
 
-class _MenuPage:
-    """右上角全局菜单里的「下载中心」，按选择器/文本两种方式提供。"""
-
-    def __init__(self, *, by_selector=None, by_text=None):
-        self.by_selector = by_selector
-        self.by_text = by_text
-        self.gotos = []
-
-    @staticmethod
-    def _collection(item):
-        items = [item] if item is not None else []
-        return SimpleNamespace(
-            count=lambda: len(items), nth=lambda index: items[index]
-        )
-
-    def locator(self, selector):
-        assert "thorn6-icon-xiazai" in selector
-        return self._collection(self.by_selector)
-
-    def get_by_text(self, text, *, exact):
-        assert (text, exact) == ("下载中心", True)
-        return self._collection(self.by_text)
-
-    def goto(self, url, *, wait_until):
-        self.gotos.append(url)
-
-    def wait_for_timeout(self, milliseconds):
-        pass
+# ---------------------------------------------------------------------- login
 
 
-def test_download_center_prefers_the_icon_selector_over_text(app_config, monkeypatch):
-    """真实 DOM：<li class="menu-item"><i class="thorn6-icon-xiazai"></i> 下载中心 </li>
+def test_login_fills_credentials_and_submits(app_config):
+    selectors = app_config.tms.selectors
+    username = _Element()
+    password = _Element()
+    # 登录成功后 SPA 离开登录路由，表单随之消失。
+    button = _Element(on_click=lambda: setattr(username, "visible", False))
+    page = _Page(
+        {
+            selectors.username: [username],
+            selectors.password: [password],
+            selectors.login_button: [button],
+        }
+    )
 
-    图标类名唯一且稳定；文本节点前后带大量空白，文本匹配今天在 10:05 和 14:05
-    第 1 次都没找到它，各白烧掉一整次尝试。
-    """
-    clicks = []
+    TmsDownloader(app_config)._login_if_needed(page, "secret")
 
-    class Menu(Probeable):
-        def evaluate(self, expression):
-            clicks.append(expression)
+    assert username.filled == "test-user"
+    assert password.filled == "secret"
+    assert button.clicks == 1
 
-    page = _MenuPage(by_selector=Menu(True))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+
+def test_login_is_skipped_when_the_form_never_appears(app_config):
+    """已登录的会话不会渲染登录表单，这不是错误。"""
+    page = _Page({app_config.tms.selectors.username: []})
+
+    TmsDownloader(app_config)._login_if_needed(page, "secret")
+
+
+def test_login_rejects_bad_credentials(app_config):
+    selectors = app_config.tms.selectors
+    # 登录框点完还在，说明账号密码没过。
+    page = _Page(
+        {
+            selectors.username: [_Element()],
+            selectors.password: [_Element()],
+            selectors.login_button: [_Element()],
+        }
+    )
+
+    with pytest.raises(TmsAuthenticationError, match="仍停留在登录页"):
+        TmsDownloader(app_config)._login_if_needed(page, "wrong")
+
+
+# ----------------------------------------------------------------- order grid
+
+
+def test_read_total_uses_the_visible_pagination(app_config):
+    """选择器自带 :visible，隐藏标签页的分页数字不会混进来。"""
+    page = _Page({app_config.tms.selectors.total_count: [_Element(text="共 4,753 条")]})
+
+    assert TmsDownloader(app_config)._read_total(page) == 4753
+
+
+def test_read_total_returns_none_when_pagination_is_absent(app_config):
+    assert TmsDownloader(app_config)._read_total(_Page()) is None
+
+
+def test_waits_out_the_loading_mask_before_reading_the_total(app_config, monkeypatch):
+    """遮罩还在就不读数——不然会读到"分页已渲染、数据还没回来"的那个 0。"""
+    reads = []
+    monkeypatch.setattr(
+        TmsDownloader, "_read_total", lambda self, page: reads.append(1) or 4753
+    )
+    mask = _Element(visible=True)
+    probes = []
+
+    def masks():
+        probes.append(1)
+        if len(probes) > 3:
+            mask.visible = False
+        return [mask]
+
+    page = _Page({".el-loading-mask": masks})
+
+    assert TmsDownloader(app_config)._wait_for_orders(page) == 4753
+    # 前三轮遮罩可见，一次都没去读分页。
+    assert len(reads) == 1
+
+
+def test_refuses_to_export_against_an_empty_grid(app_config, monkeypatch):
+    """空表格上点导出，TMS 不会建任何任务，只会在下载中心白等到超时。"""
+    app_config.tms.grid_load_timeout_seconds = 10
+    monkeypatch.setattr(TmsDownloader, "_read_total", lambda self, page: 0)
+    page = _Page({".el-loading-mask": []})
+    clock = iter([0.0] + [float(step) for step in range(1, 200)])
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(clock))
+
+    with pytest.raises(TmsDownloadError, match="10 秒内表格仍未加载出订单"):
+        TmsDownloader(app_config)._wait_for_orders(page)
+
+
+# --------------------------------------------------------------------- export
+
+
+def test_click_export_confirms_the_dialog(app_config):
+    selectors = app_config.tms.selectors
+    export = _Element()
+    confirm = _Element(text="确定")
+    page = _Page(
+        {selectors.download_button: [export], selectors.confirm_button: [confirm]}
+    )
+
+    TmsDownloader(app_config)._click_export(page)
+
+    assert (export.clicks, confirm.clicks) == (1, 1)
+
+
+def test_click_export_fails_loudly_without_an_export_button(app_config):
+    page = _Page({app_config.tms.selectors.download_button: []})
+
+    with pytest.raises(TmsDownloadError, match="未找到可见的导出按钮"):
+        TmsDownloader(app_config)._click_export(page)
+
+
+def test_click_export_requires_the_confirmation_dialog(app_config):
+    selectors = app_config.tms.selectors
+    page = _Page(
+        {selectors.download_button: [_Element()], selectors.confirm_button: []}
+    )
+
+    with pytest.raises(TmsDownloadError, match="未出现确认窗口"):
+        TmsDownloader(app_config)._click_export(page)
+
+
+def test_apply_filters_selects_the_preset_view(app_config):
+    """视图状态按账号共享且粘性，每轮都必须显式选回预设。"""
+    selectors = app_config.tms.selectors
+    trigger = _Element()
+    wanted = _Element(text="AI导出数据（勿动）")
+    other = _Element(text="上周发运")
+    query = _Element()
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element()],
+            selectors.preset_name: [trigger],
+            selectors.preset_option: [other, wanted],
+            selectors.query_button: [query],
+        }
+    )
+
+    TmsDownloader(app_config)._apply_filters(page, "current_month")
+
+    assert (trigger.clicks, wanted.clicks, other.clicks, query.clicks) == (1, 1, 0, 1)
+
+
+def test_apply_filters_names_the_presets_it_could_see(app_config):
+    """失败信息要能区分"对话框没展开"和"预设改名了"，否则下次还得猜。"""
+    selectors = app_config.tms.selectors
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element()],
+            selectors.preset_name: [_Element()],
+            selectors.preset_option: [_Element(text="上周发运"), _Element(text="本月全量")],
+            selectors.query_button: [_Element()],
+        }
+    )
+
+    with pytest.raises(TmsDownloadError) as excinfo:
+        TmsDownloader(app_config)._apply_filters(page, "current_month")
+
+    message = str(excinfo.value)
+    assert "没有找到预设视图: AI导出数据（勿动）" in message
+    assert "上周发运" in message and "本月全量" in message
+
+
+def test_apply_filters_fails_when_the_dialog_never_opens(app_config):
+    """点了高级筛选但对话框没开：此前会去点到 DOM 里另一个同类元素，白等 30 秒。"""
+    selectors = app_config.tms.selectors
+    trigger = _Element(visible=False)
+    option = _Element(text="AI导出数据（勿动）")
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element()],
+            selectors.preset_name: [trigger],
+            selectors.preset_option: [option],
+            selectors.query_button: [_Element()],
+        }
+    )
+
+    with pytest.raises(TmsDownloadError, match="未打开筛选对话框"):
+        TmsDownloader(app_config)._apply_filters(page, "current_month")
+
+    assert option.clicks == 0
+
+
+# ------------------------------------------------------------ download centre
+
+
+def test_download_center_opens_via_the_icon_selector(app_config):
+    menu = _Element()
+    page = _Page({app_config.tms.selectors.download_center_menu: [menu]})
 
     TmsDownloader(app_config)._open_download_center(page)
 
-    assert clicks == ["element => element.click()"]
+    assert menu.clicks == 1
     assert page.gotos == []
 
 
-def test_download_center_reloads_home_when_the_menu_is_missing(app_config, monkeypatch):
-    """找不到入口就重载首页重来。
+def test_download_center_reloads_home_when_the_menu_is_missing(app_config):
+    menu = _Element(visible=False)
+    page = _Page({app_config.tms.selectors.download_center_menu: [menu]})
 
-    导出任务此时已在服务端建好，页面状态不再重要；14:05 第 2 次正是靠重开浏览器
-    后 10 秒就找到了，重载比放弃整次尝试便宜得多。
-    """
-    clicks = []
-
-    class Menu(Probeable):
-        def evaluate(self, expression):
-            clicks.append(expression)
-
-    appears = Menu(True)
-    page = _MenuPage()
-    timeline = iter((0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1, 0, 0))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-
-    def reload_makes_menu_appear(url, *, wait_until):
+    def reappear(url, *, wait_until):
         page.gotos.append(url)
-        page.by_selector = appears
+        menu.visible = True
 
-    page.goto = reload_makes_menu_appear
+    page.goto = reappear
 
     TmsDownloader(app_config)._open_download_center(page)
 
     assert page.gotos == [app_config.tms.url]
-    assert clicks == ["element => element.click()"]
+    assert menu.clicks == 1
 
 
-def test_download_center_gives_up_after_one_reload(app_config, monkeypatch):
-    page = _MenuPage()
-    wait = TmsDownloader._ELEMENT_WAIT_SECONDS + 1
-    timeline = iter((0, wait, 0, wait))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
+def test_download_center_gives_up_after_one_reload(app_config):
+    page = _Page({app_config.tms.selectors.download_center_menu: []})
 
-    with pytest.raises(TmsDownloadError, match="页面未找到可见元素: 下载中心"):
+    with pytest.raises(TmsDownloadError, match="未找到下载中心入口"):
         TmsDownloader(app_config)._open_download_center(page)
 
     assert page.gotos == [app_config.tms.url]
 
 
-def test_download_center_window_is_clamped_to_remaining_budget(app_config, monkeypatch):
-    class EmptyRows:
-        def filter(self, *, has_text):
-            return self
+def test_export_links_map_task_ids_to_hrefs(app_config):
+    page = _Page(
+        {
+            app_config.tms.selectors.export_link: [
+                _Element(href="/tms/exportFileDowload?id=34920"),
+                _Element(href="/tms/exportFileDowload?id=34921"),
+                _Element(href="/tms/exportFileDowload"),
+            ]
+        }
+    )
 
-        def count(self):
-            return 0
+    assert TmsDownloader(app_config)._export_links(page) == {
+        34920: "/tms/exportFileDowload?id=34920",
+        34921: "/tms/exportFileDowload?id=34921",
+    }
 
-    class Refresh:
-        first = None
 
-        def __init__(self):
-            self.first = self
+CONFIRMED = datetime(2026, 8, 19, 10, 30)
 
-        def count(self):
-            return 0
 
-    class FakePage:
-        def locator(self, selector):
-            return EmptyRows() if selector == "tr" else Refresh()
+def _task_row(export_id, *, minutes=0, task="maintainCompanyOrderPage"):
+    """一行下载中心任务：链接 + 功能列 + 开始时间。"""
+    started = CONFIRMED + timedelta(minutes=minutes)
+    return _Element(
+        href=f"/e?id={export_id}",
+        cells=[task, started.strftime("%Y-%m-%d %H:%M"), "成功"],
+    )
 
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 2_000
 
-    # 预算只剩 60 秒时，等待窗口从默认的 5 分钟收缩到 60 秒。
-    timeline = iter((0, 0, 0, 61))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-    downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
+def test_await_export_claims_our_own_task(app_config):
+    """比基线新、功能列对得上、开始时间贴着"确定"那一刻的，才是我们的。"""
+    selectors = app_config.tms.selectors
+    rounds = [[], [], [_task_row(34922)]]
+    page = _Page(
+        {
+            selectors.download_center_menu: [_Element()],
+            selectors.refresh_button: [_Element()],
+            selectors.download_row: lambda: rounds.pop(0) if len(rounds) > 1 else rounds[0],
+        }
+    )
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
+
+    assert TmsDownloader(app_config)._await_export(page, state) == "/e?id=34922"
+
+
+def test_await_export_ignores_somebody_elses_export(app_config, monkeypatch):
+    """下载中心是全公司共享队列：id 更新但不是我们导的，绝不能拿。
+
+    2026-08-19 实测基线 815451 到本轮任务 815458 之间隔了 7 个 id，那几十秒里
+    别人也在导出——"取最大的新 id"随时会下错文件。
+    """
+    selectors = app_config.tms.selectors
+    page = _Page(
+        {
+            selectors.download_center_menu: [_Element()],
+            selectors.refresh_button: [_Element()],
+            selectors.download_row: [
+                # 功能列是别的模块
+                _task_row(34925, task="maintainCarrierPage"),
+                # 功能列对，但开始时间离"确定"太远，是别人早先排的队
+                _task_row(34926, minutes=-30),
+            ],
+        }
+    )
+    app_config.tms.download_timeout_seconds = 60
+    clock = iter([0.0] + [float(step) * 30 for step in range(1, 60)])
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(clock))
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
 
     with pytest.raises(TmsExportTaskNotFound):
-        downloader._download_from_center(
-            FakePage(), datetime(2026, 8, 14, 14, 51), 4220, budget_seconds=60
+        TmsDownloader(app_config)._await_export(page, state)
+
+
+def test_match_export_requires_a_readable_start_time(app_config):
+    """认不出开始时间就不认领：宁可再等一轮，也好过下错文件。"""
+    rows = [{"href": "/e?id=34925", "cells": ["maintainCompanyOrderPage", "成功"]}]
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
+
+    assert TmsDownloader(app_config)._match_export(rows, state) == (None, None)
+
+
+def test_match_export_takes_the_newest_of_several_of_ours(app_config):
+    """上一次尝试留下的任务也符合特征时，取最新的那个。"""
+    rows = [
+        {"href": r.href, "cells": r.cells} for r in (_task_row(34922), _task_row(34924))
+    ]
+    state = _ExportState(baseline_id=34920, confirmed_at=CONFIRMED)
+
+    assert TmsDownloader(app_config)._match_export(rows, state) == (
+        34924,
+        "/e?id=34924",
+    )
+
+
+def test_match_export_skips_the_time_window_before_the_click(app_config):
+    """还没点"确定"就没有时间基准，此时只按 id 和功能列筛，不能全盘拒绝。"""
+    rows = [{"href": r.href, "cells": r.cells} for r in (_task_row(34922, minutes=-99),)]
+    state = _ExportState(baseline_id=34920, confirmed_at=None)
+
+    assert TmsDownloader(app_config)._match_export(rows, state)[0] == 34922
+
+
+def test_await_export_window_is_clamped_to_the_remaining_budget(app_config, monkeypatch):
+    """剩余预算比配置的等待窗口短时，用预算，别占掉下一个整点。"""
+    selectors = app_config.tms.selectors
+    page = _Page(
+        {
+            selectors.download_center_menu: [_Element()],
+            selectors.refresh_button: [_Element()],
+            selectors.download_row: [],
+        }
+    )
+    app_config.tms.download_timeout_seconds = 600
+    ticks = iter([0.0, 0.0, 0.0, 200.0])
+    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(ticks))
+    state = _ExportState(baseline_id=0, budget_deadline=120.0)
+
+    with pytest.raises(TmsExportTaskNotFound, match="120 秒内"):
+        TmsDownloader(app_config)._await_export(page, state)
+
+
+# ---------------------------------------------------------------- saving file
+
+
+@pytest.mark.parametrize(("body", "suffix"), [(XLSX, ".xlsx"), (XLS, ".xls")])
+def test_save_export_names_the_file_after_its_real_format(
+    app_config, tmp_path, body, suffix
+):
+    context = _Context(_Response(body))
+
+    target = TmsDownloader(app_config)._save_export(
+        context, "/tms/exportFileDowload?id=7", "current_month-abc", tmp_path
+    )
+
+    assert target.name == f"current_month-abc{suffix}"
+    assert target.read_bytes() == body
+    assert context.requested == ["https://otb.lining.com/tms/exportFileDowload?id=7"]
+
+
+def test_save_export_rejects_an_html_error_page(app_config, tmp_path):
+    """TMS 会话过期时返回 HTML 但状态码仍是 200，按后缀存下去只会在 xlrd 里炸。"""
+    context = _Context(_Response(HTML))
+
+    with pytest.raises(TmsDownloadError, match="下载内容不是 Excel"):
+        TmsDownloader(app_config)._save_export(
+            context, "/tms/exportFileDowload?id=7", "current_month-abc", tmp_path
+        )
+
+    evidence = tmp_path / "current_month-abc-bad-body.bin"
+    assert evidence.read_bytes() == HTML
+
+
+def test_save_export_reports_http_failures(app_config, tmp_path):
+    context = _Context(_Response(b"", ok=False, status=502))
+
+    with pytest.raises(TmsDownloadError, match="HTTP 502"):
+        TmsDownloader(app_config)._save_export(
+            context, "/tms/exportFileDowload?id=7", "stem", tmp_path
         )
 
 
-@pytest.mark.parametrize(
-    ("record_count", "expected"),
-    [(4672, True), (4677, True), (4662, True), (4683, False), (12563, False)],
-)
-def test_export_task_total_allows_bounded_drift(app_config, record_count, expected):
-    """订单数一小时内会自然增减，严格相等会让本轮任务永远匹配不上。"""
-    app_config.tms.total_tolerance = 10
-
-    assert TmsDownloader(app_config)._total_matches(record_count, 4672) is expected
+# ------------------------------------------------------------------ full run
 
 
-def test_export_task_total_still_requires_a_count(app_config):
-    downloader = TmsDownloader(app_config)
-
-    # 页面总数已知但任务还没出条数（处理中）：不能当成本轮任务。
-    assert downloader._total_matches(None, 4672) is False
-    assert downloader._total_matches(None, None) is True
-
-
-def test_export_task_total_skips_filtering_when_page_total_unknown(app_config):
-    """TMS 慢时 _read_total 会返回 0，expected_total 保持 None。
-
-    这种情况下必须放行、只靠时间窗判断归属；一旦改成拒绝，本轮任务永远匹配不上，
-    5 分钟后重新点导出，最终整轮失败。
-    """
-    downloader = TmsDownloader(app_config)
-
-    assert downloader._total_matches(4672, None) is True
-    assert downloader._total_matches(0, None) is True
-
-
-@pytest.mark.parametrize("error", [CredentialError("missing"), TmsAuthenticationError("bad")])
-def test_download_does_not_retry_authentication_errors(app_config, monkeypatch, error):
-    downloader = TmsDownloader(app_config)
-    calls = 0
-
-    def fail(dataset, *, state):
-        nonlocal calls
-        calls += 1
-        raise error
-
-    monkeypatch.setattr(downloader, "_download_once", fail)
-    with pytest.raises(type(error)):
-        downloader.download()
-    assert calls == 1
-
-
-def test_download_normalizes_three_browser_failures(app_config, monkeypatch):
-    downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(
-        downloader,
-        "_download_once",
-        lambda dataset, *, state: (_ for _ in ()).throw(OSError("browser")),
-    )
-    monkeypatch.setattr("runbow007.downloader.time.sleep", lambda seconds: None)
-
-    with pytest.raises(TmsDownloadError, match="连续 3 次失败: browser"):
-        downloader.download("open_carryover")
-
-
-def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
-    export_clicks = []
-
-    class FakePage:
-        def set_default_timeout(self, timeout):
-            assert timeout == app_config.tms.navigation_timeout_seconds * 1000
-
-        def goto(self, url, *, wait_until):
-            assert (url, wait_until) == (app_config.tms.url, "domcontentloaded")
-
-    class FakeDownload:
-        suggested_filename = "orders.xlsx"
-
-        def save_as(self, target):
-            Path(target).write_bytes(b"valid workbook bytes")
-
-    page = FakePage()
-
-    class FakeContext:
-        closed = False
-
-        def new_page(self):
-            return page
-
-        def close(self):
-            self.closed = True
-
-    context = FakeContext()
-
+def _fake_playwright(monkeypatch, context, *, expect_persistent=False):
     class FakeBrowser:
         closed = False
 
         def new_context(self, **kwargs):
-            assert kwargs == {"accept_downloads": True}
+            assert kwargs == {
+                "viewport": {"width": 1600, "height": 900},
+                "locale": "zh-CN",
+            }
             return context
 
         def close(self):
@@ -451,632 +824,178 @@ def test_download_once_drives_browser_and_saves_file(app_config, monkeypatch):
 
     class FakeChromium:
         def launch_persistent_context(self, profile, **kwargs):
-            raise AssertionError("默认必须是全新浏览器，不能复用持久化 profile")
+            if not expect_persistent:
+                raise AssertionError("默认必须是全新浏览器，不能复用持久化 profile")
+            return context
 
         def launch(self, **kwargs):
             assert kwargs == {"headless": True}
             return browser
 
-    fake_playwright = SimpleNamespace(chromium=FakeChromium())
-
     class FakeManager:
         def __enter__(self):
-            return fake_playwright
+            return SimpleNamespace(chromium=FakeChromium())
 
         def __exit__(self, *args):
             return False
 
-    downloader = TmsDownloader(app_config)
     monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakeManager())
-    monkeypatch.setattr("runbow007.downloader.get_tms_password", lambda username: "password")
-    monkeypatch.setattr(downloader, "_login_if_needed", lambda page, password: None)
-    monkeypatch.setattr(downloader, "_open_order_page", lambda page: None)
-    monkeypatch.setattr(downloader, "_apply_filters", lambda page, dataset: None)
-    monkeypatch.setattr(downloader, "_read_total", lambda page: 42)
     monkeypatch.setattr(
-        downloader,
-        "_visible_locator_or_button",
-        lambda page, selector, pattern: SimpleNamespace(
-            wait_for=lambda **kwargs: export_clicks.append(("wait_for", kwargs)),
-            is_enabled=lambda **kwargs: export_clicks.append(("is_enabled", kwargs))
-            or True,
-            evaluate=lambda expression: export_clicks.append(("evaluate", expression)),
-        ),
+        "runbow007.downloader.get_tms_password", lambda username: "password"
     )
-    monkeypatch.setattr(downloader, "_confirm_export", lambda page: None)
+    return browser
+
+
+def test_download_once_snapshots_the_baseline_before_exporting(app_config, monkeypatch):
+    order = []
+    page = _Page()
+    context = _Context()
+    context.new_page = lambda: page
+    browser = _fake_playwright(monkeypatch, context)
+    downloader = TmsDownloader(app_config)
+
+    monkeypatch.setattr(downloader, "_login_if_needed", lambda page, password: None)
+    monkeypatch.setattr(
+        downloader, "_open_download_center", lambda page: order.append("open-center")
+    )
     monkeypatch.setattr(
         downloader,
-        "_download_from_center",
-        lambda page, export_started, ui_total, *, budget_seconds=None, step=None: (
-            FakeDownload()
-        ),
+        "_export_links",
+        lambda page: order.append("snapshot") or {34919: "/e?id=34919", 34920: "/e?id=34920"},
+    )
+    monkeypatch.setattr(
+        downloader, "_open_order_page", lambda page: order.append("order-page")
+    )
+    monkeypatch.setattr(
+        downloader, "_apply_filters", lambda page, dataset: order.append("filter")
+    )
+    monkeypatch.setattr(downloader, "_wait_for_orders", lambda page: 4753)
+    monkeypatch.setattr(
+        downloader, "_click_export", lambda page: order.append("export")
+    )
+    monkeypatch.setattr(
+        downloader,
+        "_await_export",
+        lambda page, state: order.append("await") or "/e?id=34921",
     )
 
-    state = _ExportState(not_before=datetime(2026, 8, 14, 10, 8))
+    state = _ExportState()
     result = downloader._download_once("current_month", state=state)
 
-    assert result.ui_total == 42
+    # 快照必须在点导出之前，之后"id 更大"才等于"本轮新建的"。
+    assert order == ["open-center", "snapshot", "order-page", "filter", "export", "await"]
+    # 逛完下载中心后 DOM 里堆着多份菜单副本，菜单导航会在上面失败；重新加载首页
+    # 换回确定的起点。首次 goto 之外，快照后必须再来一次。
+    assert page.gotos == [app_config.tms.url, app_config.tms.url]
+    assert state.baseline_id == 34920
+    assert state.expected_total == 4753
+    assert state.task_created is True
+    assert result.ui_total == 4753
     assert result.dataset == "current_month"
     assert result.path.suffix == ".xlsx"
-    assert result.path.read_bytes() == b"valid workbook bytes"
+    assert result.path.read_bytes() == XLSX
+    assert page.default_timeout == app_config.tms.navigation_timeout_seconds * 1000
     assert context.closed is True
-    assert state.expected_total == 42
-    assert state.task_created is True
-    # 点击导出前重新锚定下载中心的时间窗，避免把点击之前的任务当成本轮产物。
-    assert state.not_before > datetime(2026, 8, 14, 10, 8)
-    # 调用方已确认可见性，_dom_click 不再重复 wait_for。
-    assert export_clicks == [
-        ("is_enabled", {"timeout": 5_000}),
-        ("evaluate", "element => element.click()"),
-    ]
+    assert browser.closed is True
 
 
-def test_download_once_reuses_created_export_task(app_config, monkeypatch):
-    class FakePage:
-        def set_default_timeout(self, timeout):
-            assert timeout == app_config.tms.navigation_timeout_seconds * 1000
-
-        def goto(self, url, *, wait_until):
-            assert (url, wait_until) == (app_config.tms.url, "domcontentloaded")
-
-    class FakeDownload:
-        suggested_filename = "orders.xls"
-
-        def save_as(self, target):
-            Path(target).write_bytes(b"reused workbook")
-
-    page = FakePage()
-    context = SimpleNamespace(new_page=lambda: page, close=lambda: None)
-    browser = SimpleNamespace(new_context=lambda **kwargs: context, close=lambda: None)
-    fake_playwright = SimpleNamespace(
-        chromium=SimpleNamespace(launch=lambda **kwargs: browser)
-    )
-
-    class FakeManager:
-        def __enter__(self):
-            return fake_playwright
-
-        def __exit__(self, *args):
-            return False
+def test_download_once_reuses_a_created_export_task(app_config, monkeypatch):
+    page = _Page()
+    context = _Context(_Response(XLS))
+    context.new_page = lambda: page
+    _fake_playwright(monkeypatch, context)
+    downloader = TmsDownloader(app_config)
 
     def unexpected(*args, **kwargs):
-        raise AssertionError("existing export task must be reused")
+        raise AssertionError("已创建的导出任务不该被重复触发")
 
-    downloader = TmsDownloader(app_config)
-    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakeManager())
-    monkeypatch.setattr("runbow007.downloader.get_tms_password", lambda username: "password")
     monkeypatch.setattr(downloader, "_login_if_needed", lambda page, password: None)
     monkeypatch.setattr(downloader, "_open_order_page", unexpected)
     monkeypatch.setattr(downloader, "_apply_filters", unexpected)
-    monkeypatch.setattr(downloader, "_read_total", unexpected)
-    monkeypatch.setattr(downloader, "_locator_or_button", unexpected)
-    monkeypatch.setattr(downloader, "_confirm_export", unexpected)
+    monkeypatch.setattr(downloader, "_click_export", unexpected)
+    monkeypatch.setattr(downloader, "_export_links", unexpected)
+    monkeypatch.setattr(downloader, "_await_export", lambda page, state: "/e?id=34921")
 
-    center_calls = []
-
-    def download_from_center(
-        page, export_started, expected_total, *, budget_seconds=None, step=None
-    ):
-        center_calls.append((page, export_started, expected_total))
-        return FakeDownload()
-
-    monkeypatch.setattr(downloader, "_download_from_center", download_from_center)
-    state = _ExportState(
-        not_before=datetime(2026, 8, 14, 10, 8),
-        expected_total=4177,
-        task_created=True,
-    )
-
+    state = _ExportState(baseline_id=34920, expected_total=4753, task_created=True)
     result = downloader._download_once("current_month", state=state)
 
-    assert result.ui_total == 4177
-    assert result.path.read_bytes() == b"reused workbook"
-    assert center_calls == [(page, state.not_before, 4177)]
+    assert result.ui_total == 4753
+    assert result.path.suffix == ".xls"
 
 
-class _GridCell(Probeable):
-    def __init__(self, text, *, visible=True):
-        super().__init__(visible)
-        self.text = text
-
-    def inner_text(self, **kwargs):
-        return self.text
-
-
-class _GridPage:
-    """筛选后分页组件先渲染出来显示 0，过一会儿才回填真实条数。
-
-    每次 locator() 返回一批候选，模拟 TMS 标签页式 SPA 里同时存在的多个分页控件。
-    """
-
-    def __init__(self, batches):
-        self.batches = [
-            [c if isinstance(c, _GridCell) else _GridCell(c) for c in batch]
-            if isinstance(batch, list)
-            else [_GridCell(batch)]
-            for batch in batches
-        ]
-        self.waits = 0
-
-    def locator(self, selector):
-        cells = self.batches.pop(0) if self.batches else []
-        return SimpleNamespace(
-            count=lambda: len(cells), nth=lambda index: cells[index]
-        )
-
-    def wait_for_timeout(self, milliseconds):
-        self.waits += 1
-
-
-def test_waits_for_grid_to_report_rows_before_exporting(app_config, monkeypatch):
-    """读到 0 说明表格还没出数据，必须等到真实条数再点导出。"""
-    page = _GridPage(["共 0 条", "共 0 条", "共 4,750 条"])
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
-
-    total = TmsDownloader(app_config)._wait_for_orders_loaded(page)
-
-    assert total == 4750
-    assert page.waits == 2
-
-
-def test_waits_out_the_loading_mask(app_config, monkeypatch):
-    """TMS 点查询后会盖一层「拼命加载中」；它消失才代表表格渲染完。
-
-    networkidle 在 TMS 上几乎必然超时（后台请求就没停过），之前只能死等 2 秒。
-    """
-    states = [True, True, False]
-
-    class Mask(Probeable):
-        def __init__(self):
-            super().__init__(True)
-
-        def wait_for(self, *, state, timeout):
-            assert state == "visible"
-            if not states.pop(0):
-                raise TimeoutError("mask gone")
-
-    mask = Mask()
-
-    class FakePage:
-        def __init__(self):
-            self.waits = 0
-
-        def locator(self, selector):
-            assert selector == ".el-loading-mask"
-            return SimpleNamespace(
-                first=mask, count=lambda: 1, nth=lambda index: mask
-            )
-
-        def wait_for_timeout(self, milliseconds):
-            self.waits += 1
-
-    page = FakePage()
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
-
-    TmsDownloader(app_config)._wait_for_grid_loading(page)
-
-    # 遮罩出现 → 还在 → 消失后返回，中间退避一次。
-    assert page.waits == 1
-
-
-def test_refuses_to_export_against_an_empty_grid(app_config, monkeypatch):
-    """等不到数据就快速失败。
-
-    带着 0 往下走会在空表格上点导出，TMS 不建任务，之后在下载中心白等 8 分钟
-    ——2026-08-17 15:05 那轮就是这样烧掉 9 分钟的。
-    """
-    page = _GridPage(["共 0 条"] * 3)
-    wait = app_config.tms.grid_load_timeout_seconds
-    timeline = iter((0, 0, wait + 1))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-
-    with pytest.raises(TmsDownloadError, match="订单总数仍为 0"):
-        TmsDownloader(app_config)._wait_for_orders_loaded(page)
-
-
-def test_missing_pagination_element_does_not_block_for_the_page_default(app_config):
-    """分页组件没挂载时 inner_text 不能硬等 45 秒——那会搞挂整次尝试。"""
-
-    class Missing:
-        first = None
-
-        def __init__(self):
-            self.first = self
-
-        def inner_text(self, **kwargs):
-            assert kwargs == {"timeout": TmsDownloader._PROBE_TIMEOUT_MS}
-            raise TimeoutError("locator not attached")
-
-    page = SimpleNamespace(locator=lambda selector: Missing())
-
-    assert TmsDownloader(app_config)._read_total(page) is None
-
-
-def test_read_total_and_locator_fallback(app_config):
-    class FakePage:
-        def locator(self, selector):
-            cells = [_GridCell("共 1,211 条")]
-            return SimpleNamespace(
-                count=lambda: len(cells), nth=lambda index: cells[index]
-            )
-
-        def get_by_role(self, role, *, name):
-            assert role == "button"
-            return SimpleNamespace(last="fallback-button")
-
+def test_download_once_records_the_failing_step(app_config, monkeypatch):
+    page = _Page()
+    context = _Context()
+    context.new_page = lambda: page
+    _fake_playwright(monkeypatch, context)
     downloader = TmsDownloader(app_config)
-    assert downloader._read_total(FakePage()) == 1211
-    app_config.tms.selectors.total_count = ""
-    assert downloader._read_total(FakePage()) is None
-    assert downloader._locator_or_button(FakePage(), "", r"下载") == "fallback-button"
 
-
-def test_read_total_ignores_the_hidden_tab_pagination(app_config):
-    """TMS 是标签页式 SPA，button.pagination-total 会同时匹配到多个。
-
-    2026-08-17 实测：集团订单管理「共 4753 条」和下载中心「共 34920 条」同时在
-    DOM 里。硬取 .first 等于赌 DOM 顺序，赌输了就一直读另一个标签页的数字。
-    """
-    hidden = _GridCell("共 34920 条", visible=False)
-    active = _GridCell("共 4,753 条")
-
-    class FakePage:
-        def locator(self, selector):
-            cells = [hidden, active]
-            return SimpleNamespace(
-                count=lambda: len(cells), nth=lambda index: cells[index]
-            )
-
-    assert TmsDownloader(app_config)._read_total(FakePage()) == 4753
-
-
-def test_visible_export_button_skips_hidden_duplicate(app_config, monkeypatch):
-    class Matches:
-        def __init__(self, candidates):
-            self.candidates = candidates
-
-        def count(self):
-            return len(self.candidates)
-
-        def nth(self, index):
-            return self.candidates[index]
-
-    hidden = Probeable(False)
-    visible = Probeable(True)
-
-    class FakePage:
-        def locator(self, selector):
-            assert "thorn6-icon-daochu" in selector
-            return Matches([hidden, visible])
-
-        def get_by_role(self, role, *, name):
-            return Matches([])
-
-        def wait_for_timeout(self, milliseconds):
-            raise AssertionError("visible configured match should return immediately")
-
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
-
-    result = TmsDownloader(app_config)._visible_locator_or_button(
-        FakePage(), app_config.tms.selectors.download_button, r"下载|批量导出"
-    )
-
-    assert result is visible
-    # 阶段一是快扫：探测必须有界，且短到能在时限内扫完所有候选。
-    assert hidden.probes == [TmsDownloader._QUICK_PROBE_MS]
-
-
-def test_export_button_waits_patiently_when_nothing_is_visible_yet(
-    app_config, monkeypatch
-):
-    """快扫一轮全不可见时，要对首个候选长等一次，而不是继续短探测空转。
-
-    TMS 慢的时候元素只是还没渲染出来。8/17 白天 08:05/10:05 两轮就是死在"每个候选
-    各等 250ms、轮着来"——页面卡住时一轮就把时限耗光，实际只扫了一两轮。
-    """
-
-    class Slow:
-        """第一次快扫时不可见，只有拿到长超时才会"渲染出来"。"""
-
-        def __init__(self):
-            self.probes = []
-
-        def wait_for(self, *, state, timeout):
-            assert state == "visible"
-            self.probes.append(timeout)
-            if timeout < TmsDownloader._PATIENT_PROBE_MS:
-                raise TimeoutError("still rendering")
-
-    slow = Slow()
-
-    class Matches:
-        def count(self):
-            return 1
-
-        def nth(self, index):
-            assert index == 0
-            return slow
-
-    class FakePage:
-        def locator(self, selector):
-            return Matches()
-
-        def get_by_role(self, role, *, name):
-            return Matches()
-
-        def wait_for_timeout(self, milliseconds):
-            raise AssertionError("耐心等待命中后不应再退避")
-
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
-
-    result = TmsDownloader(app_config)._visible_locator_or_button(
-        FakePage(), app_config.tms.selectors.download_button, r"下载|批量导出"
-    )
-
-    assert result is slow
-    # 两个 collection 各快扫一次，然后对首个候选长等一次。
-    assert slow.probes == [
-        TmsDownloader._QUICK_PROBE_MS,
-        TmsDownloader._QUICK_PROBE_MS,
-        TmsDownloader._PATIENT_PROBE_MS,
-    ]
-
-
-def test_download_center_refresh_clicks_visible_duplicate():
-    evaluated = []
-
-    class Candidate(Probeable):
-        def evaluate(self, expression):
-            evaluated.append(expression)
-
-    candidates = [Candidate(False), Candidate(True)]
-
-    class Matches:
-        def count(self):
-            return len(candidates)
-
-        def nth(self, index):
-            return candidates[index]
-
-    assert TmsDownloader._click_first_visible_dom(Matches()) is True
-    assert evaluated == ["element => element.click()"]
-
-
-def test_download_center_ignores_unrelated_task_counts(app_config, monkeypatch):
-    class Link(Probeable):
-        first = None
-
-        def __init__(self):
-            super().__init__(True)
-            self.first = self
-            self.clicked = False
-
-        def count(self):
-            return 1
-
-        def click(self):
-            self.clicked = True
-
-    class Row:
-        def __init__(self, text, link=None):
-            self.text = text
-            self.link = link
-
-        def inner_text(self):
-            return self.text
-
-        def locator(self, selector):
-            assert selector == "a:has(img[src*='excel'])"
-            assert self.link is not None
-            return self.link
-
-    link = Link()
-    rows = [
-        Row("maintainCompanyOrderPage\n失败\n2026-08-14 10:07\n200\n481"),
-        Row(
-            "maintainCompanyOrderPage\n成功\n2026-08-14 10:08\n4177\n9320",
-            link,
-        ),
-    ]
-
-    class Rows:
-        def filter(self, *, has_text):
-            assert has_text == "maintainCompanyOrderPage"
-            return self
-
-        def count(self):
-            return len(rows)
-
-        def nth(self, index):
-            return rows[index]
-
-    expected_download = object()
-
-    class DownloadInfo:
-        value = expected_download
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    class FakePage:
-        def locator(self, selector):
-            assert selector == "tr"
-            return Rows()
-
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 2_000
-
-        def expect_download(self, *, timeout):
-            assert timeout > 0
-            return DownloadInfo()
-
-    downloader = TmsDownloader(app_config)
+    monkeypatch.setattr(downloader, "_login_if_needed", lambda page, password: None)
     monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: 0)
+    monkeypatch.setattr(downloader, "_export_links", lambda page: {})
+    monkeypatch.setattr(downloader, "_open_order_page", lambda page: None)
+    monkeypatch.setattr(downloader, "_apply_filters", lambda page, dataset: None)
 
-    result = downloader._download_from_center(
-        FakePage(), datetime(2026, 8, 14, 10, 8), 4177
+    def empty_grid(page):
+        raise TmsDownloadError("表格未加载出订单")
+
+    monkeypatch.setattr(downloader, "_wait_for_orders", empty_grid)
+
+    state = _ExportState()
+    with pytest.raises(TmsDownloadError, match="表格未加载出订单"):
+        downloader._download_once("current_month", state=state)
+
+    assert state.last_step == "等待订单表格出数据"
+    assert context.closed is True
+    # 失败现场落在当天的下载目录里。
+    day = app_config.runtime.downloads_dir / datetime.now(
+        ZoneInfo(app_config.runtime.timezone)
+    ).strftime("%Y%m%d")
+    assert [item.suffix for item in sorted(day.iterdir())] == [".html", ".png"]
+
+
+def test_open_order_page_navigates_the_menu(app_config):
+    selectors = app_config.tms.selectors
+    advanced = _Element(visible=False)
+    order_menu = _Element()
+    group_menu = _Element(on_click=lambda: setattr(advanced, "visible", True))
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [advanced],
+            selectors.order_menu: [order_menu],
+            selectors.group_order_menu: [group_menu],
+        }
     )
 
-    assert result is expected_download
-    assert link.clicked is True
+    TmsDownloader(app_config)._open_order_page(page)
+
+    assert (order_menu.clicks, group_menu.clicks) == (1, 1)
 
 
-def test_download_center_stops_early_when_new_export_task_never_appears(
-    app_config, monkeypatch
-):
-    class EmptyRows:
-        def filter(self, *, has_text):
-            return self
-
-        def count(self):
-            return 0
-
-    class Refresh:
-        first = None
-
-        def __init__(self):
-            self.first = self
-
-        def count(self):
-            return 0
-
-        def is_visible(self):
-            return False
-
-    class FakePage:
-        def locator(self, selector):
-            return EmptyRows() if selector == "tr" else Refresh()
-
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 2_000
-
-    app_config.tms.export_task_appear_minutes = 8
-    timeline = iter((0, 0, 0, 8 * 60 + 1))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-    downloader = TmsDownloader(app_config)
-    monkeypatch.setattr(downloader, "_open_download_center", lambda page: None)
-
-    with pytest.raises(TmsExportTaskNotFound, match="8 分钟内"):
-        downloader._download_from_center(
-            FakePage(), datetime(2026, 8, 14, 14, 51), 4220
-        )
-
-
-def test_confirm_export_accepts_disappeared_success_toast(app_config, monkeypatch):
-    class Item(Probeable):
-        def __init__(self, *, visible=False):
-            super().__init__(visible)
-            self.clicked = False
-
-        def click(self, **kwargs):
-            raise AssertionError("confirmation must use DOM click")
-
-        def is_enabled(self, **kwargs):
-            assert kwargs == {"timeout": 5_000}
-            return True
-
-        def evaluate(self, expression):
-            assert expression == "element => element.click()"
-            self.clicked = True
-
-    class Collection:
-        def __init__(self, items):
-            self.items = items
-
-        def count(self):
-            return len(self.items)
-
-        def nth(self, index):
-            return self.items[index]
-
-    confirm = Item(visible=True)
-    success = Item(visible=False)
-
-    class FakePage:
-        def get_by_role(self, role, *, name):
-            return Collection([confirm])
-
-        def get_by_text(self, text, *, exact):
-            return Collection([success])
-
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 250
-
-    timeline = iter((0, 0, 0, 11))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-
-    TmsDownloader(app_config)._confirm_export(FakePage())
-
-    assert confirm.clicked is True
-
-
-def test_confirm_export_still_requires_confirmation_dialog(app_config, monkeypatch):
-    class EmptyCollection:
-        def count(self):
-            return 0
-
-    class FakePage:
-        def get_by_role(self, role, *, name):
-            return EmptyCollection()
-
-        def wait_for_timeout(self, milliseconds):
-            assert milliseconds == 250
-
-    timeline = iter((0, 0, TmsDownloader._ELEMENT_WAIT_SECONDS + 1))
-    monkeypatch.setattr("runbow007.downloader.time.monotonic", lambda: next(timeline))
-
-    with pytest.raises(TmsDownloadError, match="未出现确认窗口"):
-        TmsDownloader(app_config)._confirm_export(FakePage())
-
-
-def test_dom_click_rejects_disabled_button():
-    class Disabled:
-        def wait_for(self, **kwargs):
-            raise AssertionError("已确认可见的元素不应再次 wait_for")
-
-        def is_enabled(self, **kwargs):
-            assert kwargs == {"timeout": 5_000}
-            return False
-
-        def evaluate(self, expression):
-            raise AssertionError("disabled button must not be clicked")
-
-    with pytest.raises(TmsDownloadError, match="页面按钮不可用: 导出"):
-        TmsDownloader._dom_click(Disabled(), "导出")
-
-
-def test_force_click_uses_dom_click_when_toast_covers_menu(app_config):
-    evaluated = []
-
-    class Candidate(Probeable):
-        def __init__(self):
-            super().__init__(True)
-
-        def evaluate(self, expression):
-            evaluated.append(expression)
-
-        def click(self):
-            raise AssertionError("covered menu must not use a pointer click")
-
-    class Matches:
-        def count(self):
-            return 1
-
-        def nth(self, index):
-            assert index == 0
-            return Candidate()
-
-    class FakePage:
-        def get_by_text(self, text, *, exact):
-            assert (text, exact) == ("下载中心", True)
-            return Matches()
-
-    TmsDownloader(app_config)._click_visible_text(
-        FakePage(), "下载中心", force=True
+def test_open_order_page_is_a_no_op_when_already_there(app_config):
+    selectors = app_config.tms.selectors
+    order_menu = _Element()
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element()],
+            selectors.order_menu: [order_menu],
+        }
     )
 
-    assert evaluated == ["element => element.click()"]
+    TmsDownloader(app_config)._open_order_page(page)
+
+    assert order_menu.clicks == 0
+
+
+def test_open_order_page_fails_when_the_grid_never_mounts(app_config):
+    selectors = app_config.tms.selectors
+    page = _Page(
+        {
+            selectors.advanced_filter_button: [_Element(visible=False)],
+            selectors.order_menu: [_Element()],
+            selectors.group_order_menu: [_Element()],
+        }
+    )
+
+    with pytest.raises(TmsDownloadError, match="未加载出高级筛选按钮"):
+        TmsDownloader(app_config)._open_order_page(page)

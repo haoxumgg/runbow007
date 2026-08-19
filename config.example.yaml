@@ -18,37 +18,51 @@ tms:
   # 结果每轮的页面结构都不一样。改成 true 可退回旧行为（例如频繁登录触发风控时）。
   persistent_profile: false
   navigation_timeout_seconds: 45
-  # 实测 4672 单导出约 2–3 分钟即可完成。等待 10 分钟足够，且能保证三次重试
-  # （0/60/180 秒退避）全部落在一小时的调度间隔内，不会吃掉下一个整点。
+  # 点导出后等下载中心生成文件的唯一超时。实测 4672 单约 2–3 分钟完成，10 分钟足够；
+  # 超时就当这次导出没成，下一次重试重新导。三次重试（0/60/180 秒退避）加起来仍落在
+  # 一小时的调度间隔内，不会吃掉下一个整点。
   download_timeout_seconds: 600
   # 点查询后等「拼命加载中」遮罩消失、表格出数据的上限。数据量大时会很慢。
   grid_load_timeout_seconds: 180
   # 单次尝试的硬上限，由 SIGALRM 强制中断。Playwright 的超时、循环 deadline、
   # 单轮预算在浏览器卡死时全部失效，这是唯一兜得住的一层。0 表示关闭。
   attempt_timeout_seconds: 900
-  # 点击导出后，等下载中心「出现」本轮任务的上限。超过就认为点击没生效、重新导出。
-  # 正常 1–2 分钟就会出现；高峰期会更慢。这个值 × 3 次尝试要留在 50 分钟的单轮
-  # 预算内，8 分钟是保持三次重试的上限。
-  export_task_appear_minutes: 8
-  # 读取页面总数到 TMS 生成导出之间订单还在增减，允许的条数漂移。
+  # 页面总数与 Excel 唯一订单数比对时允许的漂移（读页面到真正导出之间订单还在增减）。
   total_tolerance: 10
+  # 下载中心是全公司共享队列。认领本轮任务除了"id 比基线新"，还要求功能列匹配、
+  # 且任务开始时间落在点「确定」的前后这么多分钟内，避免拿到别人的导出。
+  export_task_name: maintainCompanyOrderPage
+  export_match_window_minutes: 5
   current_month_preset: AI导出数据（勿动）
   # 李宁 TMS 中配置好历史未完结查询后再填写。
   open_carryover_preset: ""
+  # 以下选择器已按 hdrunbow 账号的真实页面校准。
+  # TMS 是标签页式 SPA：打开过的页面都留在 DOM 里，非活动的只是隐藏。凡是会重复
+  # 渲染的控件（工具栏、分页、菜单项），选择器里都必须带 :visible。
   selectors:
     username: "input[name='username'], input[placeholder*='账号'], input[placeholder*='用户名']"
     password: "input[type='password']"
-    # 以下选择器已按 hdrunbow 账号的真实页面校准。
-    login_button: ".submit-btn"
-    advanced_filter_button: "#searchItem"
+    login_button: "button.submit-btn"
+    order_menu: '.el-submenu__title:has-text("订单管理"):visible'
+    group_order_menu: 'li.el-menu-item:has-text("集团订单管理"):visible'
+    advanced_filter_button: "#searchItem:visible"
+    # 只认对话框里的那一个：locator("A, B").first 取 DOM 顺序而非分支顺序，
+    # 加兜底分支会在从下载中心切回来时选错元素。
     preset_name: ".el-dialog:visible .page-header-title"
-    date_from_input: ".el-dialog:visible .el-date-editor input"
+    preset_option: ".search-list .search-item:visible"
     query_button: ".el-dialog:visible button.el-button--primary"
     # 页面总数会与 Excel 唯一订单数强校验。
-    total_count: "button.pagination-total"
-    download_button: "button:has(.thorn6-icon-daochu), button:has(.thorn6-icon-daoru)"
+    total_count: "button.pagination-total:visible"
+    download_button: "button.round-btn:has(.thorn6-icon-daoru):visible, button:has(.thorn6-icon-daochu):visible, button:has(.thorn6-icon-daoru):visible"
+    confirm_button: 'button:has-text("确定"):visible, button:has-text("确 定"):visible'
     # 右上角全局菜单里的「下载中心」。图标类名唯一且稳定，比文本匹配可靠。
     download_center_menu: "ul.right_menu li.menu-item:has(.thorn6-icon-xiazai)"
+    # 下载中心的导出文件链接。href 上的 id 自增，用来判断哪个任务是本轮新建的。
+    # Dowload 是 TMS 自己的拼写，不是笔误。
+    export_link: "a[href*='exportFileDowload']"
+    # 下载中心的任务行：链接、功能列、开始时间必须取自同一个 tr。
+    download_row: "table.el-table__body tr.el-table__row"
+    refresh_button: "#refreshItem:visible"
 
 feishu:
   # 自建应用 App ID。Linux 通过 RUNBOW007_FEISHU_APP_SECRET 提供密钥。
