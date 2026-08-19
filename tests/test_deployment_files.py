@@ -25,6 +25,31 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert app["mem_limit"] == "1200m"
 
 
+def test_build_sources_are_overridable_mirrors():
+    """构建源必须是可覆盖的 build arg，不能写死。
+
+    2026-08-19 广州的 ECS 上直连 pypi.org 拉一个 2.5 kB 的 metadata 要 12 秒，
+    构建每次都死在半路；换成阿里云 ECS 内网源后同一批请求是 0.1-0.2 秒。但把
+    镜像写死会让阿里云之外（别人的 CI、本地开发机）根本构建不出来，所以三个源
+    都留成可覆盖参数，默认值只写在 Dockerfile 一处。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    build_args = compose["services"]["app"]["build"]["args"]
+
+    for arg in ("APT_MIRROR", "PIP_INDEX", "PLAYWRIGHT_MIRROR"):
+        assert f"ARG {arg}" in dockerfile, f"Dockerfile 缺少 {arg}"
+        assert arg in build_args, f"compose 没有透传 {arg}"
+        # 留空表示「有同名环境变量就透传」，默认值不能在 compose 里再写一遍。
+        assert build_args[arg] is None, f"{arg} 的默认值只应写在 Dockerfile 里"
+
+    # 内网源只有 http，缺了 trusted-host pip 会直接拒绝。
+    assert "--trusted-host" in dockerfile
+    # npmmirror 对 playwright 1.62.0 锁定的 chromium revision 1234 返回 404，
+    # 默认必须留空走上游，不能给一个会 404 的默认值。
+    assert "ARG PLAYWRIGHT_MIRROR=\n" in dockerfile
+
+
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():
     timer_dir = ROOT / "deploy" / "systemd"
     hourly = (timer_dir / "runbow007-hourly.timer").read_text(encoding="utf-8")

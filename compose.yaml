@@ -4,6 +4,12 @@ services:
   app:
     build:
       context: .
+      # 默认值只写在 Dockerfile 里；这里留空表示「有同名环境变量就透传，没有就用
+      # Dockerfile 的默认」，这样国内镜像源的默认值不会在两处各写一遍。
+      args:
+        APT_MIRROR:
+        PIP_INDEX:
+        PLAYWRIGHT_MIRROR:
     image: runbow007:local
     init: true
     ipc: host
