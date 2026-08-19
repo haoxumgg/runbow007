@@ -240,3 +240,26 @@ def test_deploy_bounds_the_image_build():
     assert "-eq 124" in script, "需要把超时和普通构建失败区分开"
     # `if ! cmd` 会让 then 分支里的 $? 变成取反后的值，读不到 124。
     assert "if ! timeout" not in script
+
+
+def test_apt_mirror_is_opt_in_and_wired_through_the_build():
+    """境外 apt 源在这台服务器上只有约 64 KB/s，光装依赖就能吃光构建预算。
+
+    镜像源必须是可选的：Dockerfile 默认不改写，任何网络环境都能构建；
+    国内服务器由部署脚本传入，而且用的是本项目已在使用的阿里云源。
+    """
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "deploy-alinux3.sh").read_text(encoding="utf-8")
+
+    assert 'ARG APT_MIRROR=""' in dockerfile, "默认必须为空，保持镜像可移植"
+    assert 'if [ -n "${APT_MIRROR}" ]' in dockerfile, "留空时不得改写 apt 源"
+    # bookworm 两种 sources 格式都要覆盖。
+    assert "/etc/apt/sources.list.d/debian.sources" in dockerfile
+    assert "/etc/apt/sources.list" in dockerfile
+
+    assert "APT_MIRROR: ${RUNBOW007_APT_MIRROR:-}" in compose
+    assert "mirrors.cloud.aliyuncs.com" in deploy
+    # 与安装 Docker CE 用的是同一个源，不引入新的来源。
+    bootstrap = (ROOT / "scripts" / "deploy-from-actions.sh").read_text(encoding="utf-8")
+    assert "mirrors.cloud.aliyuncs.com" in bootstrap

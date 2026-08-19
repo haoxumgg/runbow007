@@ -17,6 +17,21 @@ WORKDIR /app
 # 版本必须跟 pyproject.toml 里的精确锁保持一致，否则后面的 pip install . 会把
 # playwright 升级掉，而已经下好的浏览器是按版本存放的，运行时才会报"可执行文件
 # 不存在"。下面装完项目后有一条断言把这种不一致变成构建期的显式失败。
+# 可选的 apt 镜像源。默认空 = 不改写，镜像在任何网络环境下都能正常构建。
+# 部署到国内服务器时由 scripts/deploy-alinux3.sh 传入：实测这台机器到
+# deb.debian.org 只有约 64 KB/s（libicu72 的 9.4MB 用了 146 秒），而
+# playwright install --with-deps 要装几十个 OS 依赖，光这一步就能吃光构建预算。
+ARG APT_MIRROR=""
+RUN set -eu; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      for source in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        if [ -f "$source" ]; then \
+          sed -i "s|deb.debian.org|${APT_MIRROR}|g" "$source"; \
+          echo "apt 源已切换为 ${APT_MIRROR}: $source"; \
+        fi; \
+      done; \
+    fi
+
 ARG PLAYWRIGHT_VERSION=1.62.0
 RUN python -m pip install --upgrade pip \
     && python -m pip install "playwright==${PLAYWRIGHT_VERSION}" \

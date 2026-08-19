@@ -46,6 +46,12 @@ chmod +x \
 
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 
+# 构建时把 apt 指向阿里云镜像。这台服务器到境外源的吞吐普遍很低，2026-08-19
+# 一次构建光 apt 就耗掉 21 分钟仍未装完，浏览器下载还没轮到就触发了构建上限。
+# mirrors.cloud.aliyuncs.com 是本项目已经在用的源（见 deploy-from-actions.sh
+# 安装 Docker CE 的部分），这里不引入新的来源。置空可退回 Debian 官方源。
+export RUNBOW007_APT_MIRROR="${RUNBOW007_APT_MIRROR-mirrors.cloud.aliyuncs.com}"
+
 # 构建必须有上限。缓存命中时这一步是秒级，需要重新下载 Playwright 浏览器时才会
 # 变长——而这台服务器到 cdn.playwright.dev 的吞吐随时段剧烈波动：2026-08-18
 # 15:53 全部下完只用了 165 秒，同日 18:00 起实测只有约 0.1 MB/s，300MB 根本不可能
