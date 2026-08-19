@@ -21,8 +21,12 @@ def test_compose_has_no_inbound_ports_and_persists_state():
     assert "./downloads:/app/downloads" in volumes
     assert "./browser-profile:/app/browser-profile" in volumes
     assert app["environment"]["RUNBOW007_TMS_DOWNLOAD_TIMEOUT_SECONDS"] == "600"
-    # 服务器只有 2 GiB：卡死的 Chromium 必须先撑爆容器，而不是整台机器。
-    assert app["mem_limit"] == "1200m"
+    # 不设 mem_limit 是 2026-08-19 迁新服务器（空闲 4 GiB）时的明确决定，不是漏写：
+    # 按旧的 2 GiB 机器算出来的 1200m 会让大数据量的那一轮被容器内 OOM 打断。
+    # 代价是卡死的 Chromium 又能拖垮整台机器（2026-08-17 就发生过一次），真要加
+    # 回来请用 2g 而不是 1200m。
+    assert "mem_limit" not in app
+    assert "mem_swappiness" not in app
 
 
 def test_browsers_come_from_the_playwright_image_not_the_zip_cdn():
