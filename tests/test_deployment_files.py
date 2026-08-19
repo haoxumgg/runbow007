@@ -37,7 +37,12 @@ def test_build_sources_are_overridable_mirrors():
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     build_args = compose["services"]["app"]["build"]["args"]
 
-    for arg in ("APT_MIRROR", "PIP_INDEX", "PLAYWRIGHT_MIRROR"):
+    for arg in (
+        "APT_MIRROR",
+        "PIP_INDEX",
+        "PLAYWRIGHT_MIRROR",
+        "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
+    ):
         assert f"ARG {arg}" in dockerfile, f"Dockerfile 缺少 {arg}"
         assert arg in build_args, f"compose 没有透传 {arg}"
         # 留空表示「有同名环境变量就透传」，默认值不能在 compose 里再写一遍。
@@ -45,9 +50,12 @@ def test_build_sources_are_overridable_mirrors():
 
     # 内网源只有 http，缺了 trusted-host pip 会直接拒绝。
     assert "--trusted-host" in dockerfile
-    # npmmirror 对 playwright 1.62.0 锁定的 chromium revision 1234 返回 404，
-    # 默认必须留空走上游，不能给一个会 404 的默认值。
+    # npmmirror 对 playwright 1.62.0 锁定的 chromium revision 1234 只同步了 arm64，
+    # x64 直接 404，默认必须留空走上游，不能给一个会 404 的默认值。
     assert "ARG PLAYWRIGHT_MIRROR=\n" in dockerfile
+    # Playwright 自己的 socket 超时只有 30 秒（NET_DEFAULT_TIMEOUT = 3e4），跨境
+    # 下载抖一下就中止整个下载，必须放宽。
+    assert "ARG PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000" in dockerfile
 
 
 def test_systemd_timers_are_persistent_and_use_shanghai_timezone():

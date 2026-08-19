@@ -10,6 +10,7 @@ services:
         APT_MIRROR:
         PIP_INDEX:
         PLAYWRIGHT_MIRROR:
+        PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT:
     image: runbow007:local
     init: true
     ipc: host
