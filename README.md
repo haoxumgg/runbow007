@@ -11,7 +11,12 @@
 - 新异常立即提醒，R3/R4 未解决异常每天 09:00 后最多再提醒一次；
 - 通过飞书自建应用发送群消息，可选真正 @ 指定用户；
 - 默认演练模式，不会误发生产群；
-- 支持手工下载 Excel 后走同一套校验、规则和发送链路。
+- 支持手工下载 Excel 后走同一套校验、规则和发送链路；
+- 提供人工上传兜底页面：登录后上传 TMS 导出的 Excel，解析完成即刻推送同一个飞书群。
+
+> 李宁 TMS 的自动导出经常取不到数据，所以 **自动下载定时任务默认是关闭的**，
+> 日常改用人工上传页面；确认自动下载恢复稳定后，用 `scripts/timers-alinux3.sh on`
+> 手动打开。
 
 ## 业务规则
 
@@ -35,6 +40,44 @@
 ### R4 延迟无原因
 
 “是否延迟=是”且“延迟原因”为空、空字符串或全空格。
+
+## 人工上传兜底页面
+
+TMS 自动下载取不到数据时的主用入口。从李宁 TMS 下载中心把 Excel 下载到本地，
+打开 `http://<服务器地址>:8080/`，用 `admin` / `admin123456` 登录后上传，页面会：
+
+1. 按 `.xls`/`.xlsx` 校验必要表头、订单号唯一性；填了「页面总条数」时还会比对导出是否完整；
+2. 跑与定时任务完全相同的 R1–R4 规则和行数合理性检查；
+3. 解析完成立即把汇总消息推送到 `config.yaml` 里配置的飞书群；
+4. 回显解析行数、分规则命中数、本次推送数和运行编号。
+
+去重逻辑与自动任务一致：已经提醒过的订单不会被重复推送，所以「规则命中数」可能大于
+「本次推送数」。勾选「只解析、不发送飞书」可以先演练一遍再决定是否发送。
+
+默认勾选 R1/R3/R4（与原来每小时任务一致）；R2 是当天签收汇总，需要时手动勾选。
+可以在 `config.yaml` 的 `web.default_rules` 里改默认值。
+
+### 改掉默认口令
+
+页面直接暴露在公网上时，**必须**先改口令，并在服务器安全组里把 8080 端口限制到
+办公出口 IP：
+
+```bash
+# 方式一：写到 /etc/runbow007/secrets.env（不进仓库）
+RUNBOW007_WEB_USERNAME='填写账号'
+RUNBOW007_WEB_PASSWORD='填写口令'
+
+# 方式二：生成哈希后填到 config.yaml 的 web.password_hash，并清空 web.password
+docker compose run --rm app --config /app/config.yaml web-password
+```
+
+改完执行 `sudo scripts/web-alinux3.sh restart` 生效。
+
+### 本地运行
+
+```powershell
+.\.venv\Scripts\runbow007.exe --config config.yaml web --host 127.0.0.1 --port 8080
+```
 
 ## Windows 本地安装
 
@@ -113,7 +156,11 @@ tms:
 - `Runbow007-Hourly`：全天每小时执行 R1/R3/R4；
 - `Runbow007-Arrival`：每天 13:30 刷新并执行 R2。
 
-不传 `-EnableSending` 时，定时任务只演练不发送。
+不传 `-EnableSending` 时，定时任务只演练不发送。TMS 自动下载不稳定期间可以先关掉：
+
+```powershell
+.\scripts\register-scheduled-tasks.ps1 -Disable
+```
 
 ## Alibaba Cloud Linux 3 部署
 
@@ -129,7 +176,9 @@ docker --version
 docker compose version
 ```
 
-服务器不需要开放入站端口。构建时需要访问 PyPI 和浏览器下载源；运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
+人工上传页面需要开放一个入站端口（默认 8080，在 `/etc/runbow007/runtime.env` 的
+`RUNBOW007_WEB_PORT` 里改），建议在安全组里只放行办公出口 IP。构建时需要访问 PyPI 和
+浏览器下载源；运行时需要通过 HTTPS 访问 `otb.lining.com` 和 `open.feishu.cn`。
 
 ### 使用 GitHub Actions 部署（推荐）
 
@@ -153,7 +202,14 @@ Repository secrets：
 - `RUNBOW007_TMS_PASSWORD`：李宁 TMS 密码；
 - `RUNBOW007_FEISHU_APP_SECRET`：飞书应用 App Secret。
 
-然后打开 `Actions → deploy → Run workflow`。首次保持 `run_smoke_test=true`、`enable_timers=false`、`enable_sending=false`；候选数量验收后，才同时启用定时器和真实发送。部署冒烟下载始终强制不发送飞书，只有显式选择 `enable_sending=true` 才会修改服务器发送开关。
+Repository secrets 里还可以放两个可选项，用来覆盖人工上传页面的默认账号：
+`RUNBOW007_WEB_PASSWORD`（口令）；账号放在 Repository variables 的
+`RUNBOW007_WEB_USERNAME`。不配置时沿用 `config.yaml` 里的 `admin` / `admin123456`。
+
+然后打开 `Actions → deploy → Run workflow`。`run_smoke_test` 和 `enable_timers` 默认都是
+`false`：TMS 下载不稳定，部署不应该被一次取不到数的演练拖垮，定时器也保持关闭。每次部署
+都会安装并拉起人工上传页面。只有显式选择 `enable_sending=true` 才会修改定时任务的发送开关；
+部署冒烟下载始终强制不发送飞书。
 
 ### 2. 部署代码
 
@@ -163,7 +219,8 @@ cd /opt/runbow007
 sudo ./scripts/deploy-alinux3.sh
 ```
 
-脚本会构建镜像、创建持久化目录并安装 systemd 文件，但首次不会启动定时器。以下目录由 UID `10001` 的容器用户写入：
+脚本会构建镜像、创建持久化目录、安装 systemd 文件并拉起人工上传页面；自动下载定时器
+会被显式关闭。以下目录由 UID `10001` 的容器用户写入：
 
 ```text
 /opt/runbow007/data
@@ -193,6 +250,8 @@ RUNBOW007_FEISHU_CHAT_ID='填写群 ID'
 
 ### 4. 演练并启用定时器
 
+自动下载定时器默认关闭。需要重新打开时（确认 TMS 导出稳定之后）：
+
 ```bash
 # 执行一次完整演练（登录、下载、校验，不发送飞书）
 sudo /opt/runbow007/scripts/run-alinux3.sh hourly
@@ -200,13 +259,13 @@ sudo /opt/runbow007/scripts/run-alinux3.sh hourly
 # 确认演练日志
 sudo journalctl -u runbow007-hourly.service -n 200 --no-pager
 
-# 启用 7×24 定时器；此时仍默认不发送飞书
-cd /opt/runbow007
-sudo ./scripts/deploy-alinux3.sh --enable-timers
-systemctl list-timers 'runbow007-*'
+# 打开/关闭/查看自动下载定时器
+sudo /opt/runbow007/scripts/timers-alinux3.sh on
+sudo /opt/runbow007/scripts/timers-alinux3.sh off
+sudo /opt/runbow007/scripts/timers-alinux3.sh status
 ```
 
-定时器安排：
+打开后的定时器安排：
 
 - 每小时第 5 分钟执行 R1/R3/R4；
 - 每天 13:30（Asia/Shanghai）执行 R2；
@@ -226,10 +285,16 @@ RUNBOW007_ENABLE_SENDING=true
 常用运维命令：
 
 ```bash
-systemctl status runbow007-hourly.timer runbow007-arrival.timer
+# 人工上传页面
+sudo /opt/runbow007/scripts/web-alinux3.sh status
+sudo /opt/runbow007/scripts/web-alinux3.sh restart
+sudo /opt/runbow007/scripts/web-alinux3.sh logs 200
+
+# 自动下载定时任务
+sudo /opt/runbow007/scripts/timers-alinux3.sh status
 sudo systemctl start runbow007-hourly.service
 sudo journalctl -u runbow007-hourly.service -f
-sudo systemctl disable --now runbow007-hourly.timer runbow007-arrival.timer
+sudo /opt/runbow007/scripts/timers-alinux3.sh off
 ```
 
 ## 常用命令
@@ -243,11 +308,18 @@ runbow007 --config config.yaml process-file order.xls --rules R1,R3,R4
 
 # 自动下载历史未完结数据（需先配置对应保存筛选）
 runbow007 --config config.yaml run --dataset open_carryover --rules R1,R3,R4
+
+# 启动人工上传兜底页面
+runbow007 --config config.yaml web
+
+# 生成上传页面的口令哈希
+runbow007 --config config.yaml web-password
 ```
 
 ## 数据安全
 
 - Windows 将账号密码和飞书 App Secret 保存在凭据管理器；Linux 从权限为 `600` 的服务器密钥文件注入环境变量；
+- 人工上传页面要求登录，会话 Cookie 为 `HttpOnly` + `SameSite=Strict`，表单带 CSRF 令牌，连续登录失败会被临时拒绝；口令建议用 `web.password_hash` 保存哈希，页面本身没有 HTTPS，务必用安全组限制来源 IP；
 - 原始 Excel、SQLite、日志和浏览器配置目录均被 `.gitignore` 排除；
 - Excel 按 `retain_days` 自动清理，默认保留 30 天；日志按天轮转并保留相同天数；
 - 每次运行记录文件 SHA-256、行数、候选数、发送数和失败原因。

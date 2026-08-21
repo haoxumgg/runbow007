@@ -118,7 +118,9 @@ chmod +x \
   scripts/deploy-alinux3.sh \
   scripts/deploy-from-actions.sh \
   scripts/run-alinux3.sh \
-  scripts/notify-failure-alinux3.sh
+  scripts/notify-failure-alinux3.sh \
+  scripts/web-alinux3.sh \
+  scripts/timers-alinux3.sh
 ./scripts/deploy-alinux3.sh
 
 if [[ "$run_smoke_test" == "true" ]]; then
@@ -147,10 +149,15 @@ fi
 chmod 0640 "$runtime_file"
 echo "定时任务飞书发送开关已设置为: $enable_sending"
 
+# TMS 自动下载经常取不到数据，定时器默认关闭，改由人工上传页面兜底。
+# deploy-alinux3.sh 已经按默认关闭处理，这里只负责显式打开的情况。
 if [[ "$enable_timers" == "true" ]]; then
-  systemctl enable --now runbow007-hourly.timer runbow007-arrival.timer
+  ./scripts/timers-alinux3.sh on
   systemctl --no-pager --full status runbow007-hourly.timer runbow007-arrival.timer
 else
-  echo "定时器保持关闭；验收后可重新运行工作流并启用。"
+  ./scripts/timers-alinux3.sh off
 fi
+
+echo "人工上传页面："
+./scripts/web-alinux3.sh status || true
 

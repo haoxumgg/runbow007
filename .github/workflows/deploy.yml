@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       run_smoke_test:
-        description: "部署后执行一次真实下载演练（不会发送飞书消息）"
+        description: "部署后执行一次真实 TMS 下载演练（不稳定，默认关闭；不会发送飞书消息）"
         required: true
-        default: true
+        default: false
         type: boolean
       enable_timers:
-        description: "演练成功后启用 7×24 systemd 定时器"
+        description: "启用自动去 TMS 取数的 7×24 定时器（默认关闭，改用人工上传页面兜底）"
         required: true
         default: false
         type: boolean
@@ -59,6 +59,7 @@ jobs:
       RUNBOW007_TMS_USERNAME: ${{ vars.RUNBOW007_TMS_USERNAME }}
       RUNBOW007_FEISHU_APP_ID: ${{ vars.RUNBOW007_FEISHU_APP_ID }}
       RUNBOW007_FEISHU_CHAT_ID: ${{ vars.RUNBOW007_FEISHU_CHAT_ID }}
+      RUNBOW007_WEB_USERNAME: ${{ vars.RUNBOW007_WEB_USERNAME }}
 
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +122,7 @@ jobs:
         env:
           RUNBOW007_TMS_PASSWORD: ${{ secrets.RUNBOW007_TMS_PASSWORD }}
           RUNBOW007_FEISHU_APP_SECRET: ${{ secrets.RUNBOW007_FEISHU_APP_SECRET }}
+          RUNBOW007_WEB_PASSWORD: ${{ secrets.RUNBOW007_WEB_PASSWORD }}
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/runbow007-${GITHUB_SHA}.tar.gz"
@@ -137,6 +139,11 @@ jobs:
               "RUNBOW007_FEISHU_APP_SECRET",
               "RUNBOW007_FEISHU_CHAT_ID",
           )
+          # 人工上传页面的登录凭据是可选项；不配置时沿用 config.yaml 里的默认账号。
+          optional_names = (
+              "RUNBOW007_WEB_USERNAME",
+              "RUNBOW007_WEB_PASSWORD",
+          )
 
           def compose_quote(value: str) -> str:
               if "\n" in value or "\r" in value:
@@ -149,6 +156,11 @@ jobs:
               return f'"{escaped}"'
 
           content = "".join(f"{name}={compose_quote(os.environ[name])}\n" for name in names)
+          content += "".join(
+              f"{name}={compose_quote(os.environ[name])}\n"
+              for name in optional_names
+              if os.environ.get(name)
+          )
           target = Path(os.environ["PAYLOAD_PATH"])
           target.write_text(content, encoding="utf-8")
           target.chmod(0o600)

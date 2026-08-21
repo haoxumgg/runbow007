@@ -124,6 +124,7 @@ class Pipeline:
                 len(candidates),
                 sent_count,
                 not should_send,
+                _count_by_rule(candidates, selected),
             )
         except Exception as exc:
             self.store.complete_run(
@@ -287,6 +288,16 @@ def _log_rule_preconditions(orders: Sequence[Order]) -> None:
         delayed,
         arrival_equals_signed,
     )
+
+
+def _count_by_rule(
+    candidates: list[ReminderCandidate], selected_rules: tuple[str, ...]
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {code: 0 for code in selected_rules}
+    for candidate in candidates:
+        if candidate.rule_code in counts:
+            counts[candidate.rule_code] += 1
+    return tuple(counts.items())
 
 
 def _sha256(path: Path) -> str:

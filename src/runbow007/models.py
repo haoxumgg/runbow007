@@ -67,3 +67,5 @@ class RunResult:
     candidate_count: int
     sent_count: int
     dry_run: bool
+    # 按规则拆开的当前命中数，人工上传页面用它回显"这一轮到底推了什么"。
+    rule_counts: tuple[tuple[str, int], ...] = ()

@@ -1,0 +1,17 @@
+[Unit]
+Description=Runbow007 manual upload web page
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/runbow007
+EnvironmentFile=/etc/runbow007/runtime.env
+ExecStart=/opt/runbow007/scripts/web-alinux3.sh start
+ExecStop=/opt/runbow007/scripts/web-alinux3.sh stop
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target

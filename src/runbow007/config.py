@@ -70,6 +70,28 @@ class FeishuConfig:
 
 
 @dataclass(slots=True)
+class WebConfig:
+    """人工上传兜底页面。
+
+    李宁 TMS 的导出经常取不到数据，自动下载不能作为唯一入口。这个页面让人把
+    手工下载的 Excel 传进来，走完全相同的解析、规则和发送链路。
+    """
+
+    host: str = "0.0.0.0"  # noqa: S104 - 容器内必须监听所有网卡，对外暴露由安全组控制
+    port: int = 8080
+    username: str = "admin"
+    password: str = "admin123456"
+    # 填写后优先于 password，格式为 pbkdf2_sha256$迭代次数$盐$哈希。
+    password_hash: str = ""
+    session_timeout_minutes: int = 480
+    max_upload_mb: int = 32
+    # 上传页默认勾选的规则；与原来每小时任务一致，R2 需要时再手动勾选。
+    default_rules: tuple[str, ...] = ("R1", "R3", "R4")
+    # 只有整站走 HTTPS 时才打开，否则浏览器会直接丢掉会话 Cookie。
+    secure_cookie: bool = False
+
+
+@dataclass(slots=True)
 class RulesConfig:
     enabled: tuple[str, ...] = ("R1", "R2", "R3", "R4")
     wms_lead_minutes: int = 90
@@ -86,6 +108,7 @@ class AppConfig:
     tms: TmsConfig
     feishu: FeishuConfig
     rules: RulesConfig
+    web: WebConfig = field(default_factory=WebConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> AppConfig:
@@ -101,6 +124,7 @@ class AppConfig:
         tms_raw = raw.get("tms", {})
         feishu_raw = raw.get("feishu", {})
         rules_raw = raw.get("rules", {})
+        web_raw = raw.get("web", {})
         selectors_raw = tms_raw.get("selectors", {})
 
         runtime = RuntimeConfig(
@@ -132,7 +156,21 @@ class AppConfig:
         rules_values = _known_values(RulesConfig, rules_raw, exclude={"enabled"})
         rules = RulesConfig(**rules_values, enabled=enabled)
 
-        config = cls(source_path, runtime, tms, feishu, rules)
+        default_rules = tuple(
+            str(item).upper()
+            for item in web_raw.get("default_rules", WebConfig().default_rules)
+        )
+        web_values = _known_values(WebConfig, web_raw, exclude={"default_rules"})
+        web = WebConfig(**web_values, default_rules=default_rules)
+        web.host = _environment_value("RUNBOW007_WEB_HOST", web.host)
+        web.port = _environment_int("RUNBOW007_WEB_PORT", web.port)
+        web.username = _environment_value("RUNBOW007_WEB_USERNAME", web.username)
+        web.password = _environment_value("RUNBOW007_WEB_PASSWORD", web.password)
+        web.password_hash = _environment_value(
+            "RUNBOW007_WEB_PASSWORD_HASH", web.password_hash
+        )
+
+        config = cls(source_path, runtime, tms, feishu, rules, web)
         config.validate()
         return config
 
@@ -168,6 +206,19 @@ class AppConfig:
             raise ConfigError(
                 "tms.attempt_timeout_seconds 必须在 60 到 3600 之间（0 表示关闭）"
             )
+        unknown_web_rules = set(self.web.default_rules) - {"R1", "R2", "R3", "R4"}
+        if unknown_web_rules:
+            raise ConfigError(f"未知规则: {', '.join(sorted(unknown_web_rules))}")
+        if not self.web.username:
+            raise ConfigError("web.username 不能为空")
+        if not self.web.password and not self.web.password_hash:
+            raise ConfigError("web.password 与 web.password_hash 必须至少填写一个")
+        if not 1 <= self.web.port <= 65535:
+            raise ConfigError("web.port 必须在 1 到 65535 之间")
+        if not 5 <= self.web.session_timeout_minutes <= 60 * 24 * 7:
+            raise ConfigError("web.session_timeout_minutes 必须在 5 到 10080 之间")
+        if not 1 <= self.web.max_upload_mb <= 200:
+            raise ConfigError("web.max_upload_mb 必须在 1 到 200 之间")
         if sending:
             missing = [
                 name

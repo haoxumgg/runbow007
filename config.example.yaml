@@ -59,6 +59,24 @@ feishu:
   mention_name: 许昊
   request_timeout_seconds: 20
 
+# 人工上传兜底页面。TMS 自动下载取不到数据时，人工把 TMS 导出的 Excel 传进来，
+# 走完全相同的解析、规则和飞书发送链路。
+web:
+  # 容器内必须监听 0.0.0.0，对外暴露范围由服务器安全组控制。
+  host: 0.0.0.0
+  port: 8080
+  username: admin
+  # 默认口令仅用于首次登录，务必尽快改掉；也可以用 RUNBOW007_WEB_PASSWORD 覆盖。
+  password: admin123456
+  # 不想在文件里放明文时，用 `runbow007 web-password` 生成哈希填到这里，优先于 password。
+  password_hash: ""
+  session_timeout_minutes: 480
+  max_upload_mb: 32
+  # 上传页默认勾选的规则，与原来每小时任务一致；R2 是当天签收汇总，需要时再勾。
+  default_rules: [R1, R3, R4]
+  # 只有整站走 HTTPS 时才改成 true，否则浏览器会丢掉会话 Cookie。
+  secure_cookie: false
+
 rules:
   enabled: [R1, R2, R3, R4]
   # 离厂时间为空，且北京时间已超过 WMS过账时间 + 90 分钟时提醒。
