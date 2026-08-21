@@ -68,9 +68,12 @@ install -m 0644 deploy/systemd/runbow007-failure@.service /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-web.service /etc/systemd/system/
 systemctl daemon-reload
 
-# 人工上传兜底页面是常驻服务，任何时候都要在。
+# 人工上传兜底页面是常驻服务，任何时候都要在。走 systemctl 而不是直接调脚本：
+# 直接调脚本容器确实起来了，但 systemd 眼里这个 unit 还是 inactive，之后
+# `systemctl stop` 会静默地什么都不做。restart 在未启动时等同于启动，已启动时
+# 会先执行 ExecStop 再重新拉起，正好保证重新部署时容器换成新镜像。
 systemctl enable runbow007-web.service
-./scripts/web-alinux3.sh start
+systemctl restart runbow007-web.service
 systemctl --no-pager --full status runbow007-web.service || true
 
 if $enable_timers; then

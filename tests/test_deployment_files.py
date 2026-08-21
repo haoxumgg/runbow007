@@ -49,7 +49,10 @@ def test_manual_upload_service_is_installed_and_started_by_the_deploy():
     assert "WantedBy=multi-user.target" in unit
     assert "runbow007-web.service /etc/systemd/system/" in deploy_script
     assert "systemctl enable runbow007-web.service" in deploy_script
-    assert "./scripts/web-alinux3.sh start" in deploy_script
+    # 必须让 systemd 自己拉起来：直接调脚本会让 unit 停在 inactive，
+    # 之后 `systemctl stop` 静默失效，容器还在跑。
+    assert "systemctl restart runbow007-web.service" in deploy_script
+    assert "./scripts/web-alinux3.sh start" not in deploy_script
     assert "compose up -d web" in web_script
     assert 'source "$runtime_file"' in web_script
 
