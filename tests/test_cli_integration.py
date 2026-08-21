@@ -183,6 +183,40 @@ def test_credentials_commands_use_system_store(app_config, monkeypatch, capsys):
     assert "已保存" in capsys.readouterr().out
 
 
+def test_web_command_serves_without_holding_the_job_lock(app_config, monkeypatch):
+    """常驻页面不能一直占着任务锁，否则每次上传自己就把自己锁死了。"""
+    started = []
+    monkeypatch.setattr(cli.AppConfig, "load", lambda path: app_config)
+    monkeypatch.setattr(
+        cli.portalocker,
+        "Lock",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应获取任务锁")),
+    )
+    monkeypatch.setattr(
+        cli, "serve", lambda config, *, host, port: started.append((config, host, port))
+    )
+
+    status = cli.main(["--config", "x", "web", "--host", "127.0.0.1", "--port", "9000"])
+
+    assert status == 0
+    assert started == [(app_config, "127.0.0.1", 9000)]
+
+
+def test_web_password_prints_a_hash_and_rejects_a_mismatch(
+    app_config, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli.AppConfig, "load", lambda path: app_config)
+    entered = iter(["新口令", "新口令", "新口令", "打错了"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(entered))
+
+    assert cli.main(["--config", "x", "web-password"]) == 0
+    printed = capsys.readouterr().out
+    assert "pbkdf2_sha256$" in printed
+
+    assert cli.main(["--config", "x", "web-password"]) == 2
+    assert "两次输入不一致" in capsys.readouterr().err
+
+
 def test_cleanup_downloads_tolerates_os_error(app_config, monkeypatch):
     monkeypatch.setattr(cli, "cleanup_old_downloads", lambda *args, **kwargs: 2)
     cli._cleanup_downloads(app_config)

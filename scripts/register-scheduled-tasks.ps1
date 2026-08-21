@@ -1,11 +1,25 @@
 param(
     [string]$ConfigPath = "config.yaml",
-    [switch]$EnableSending
+    [switch]$EnableSending,
+    # 自动去 TMS 取数经常取不到数据；用 -Disable 关掉两个定时任务，改用人工上传页面。
+    [switch]$Disable
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Executable = Join-Path $ProjectRoot ".venv\Scripts\runbow007.exe"
+
+if ($Disable) {
+    foreach ($TaskName in @("Runbow007-Hourly", "Runbow007-Arrival")) {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Disable-ScheduledTask -TaskName $TaskName | Out-Null
+            Write-Host "已关闭定时任务 $TaskName"
+        }
+    }
+    Write-Host "需要重新打开时执行：Enable-ScheduledTask -TaskName Runbow007-Hourly"
+    return
+}
+
 $ResolvedConfig = (Resolve-Path -LiteralPath (Join-Path $ProjectRoot $ConfigPath)).Path
 
 if (-not (Test-Path -LiteralPath $Executable)) {

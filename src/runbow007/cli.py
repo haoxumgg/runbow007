@@ -17,6 +17,7 @@ from .downloader import TmsDownloader
 from .notifier import FeishuClient, FeishuMessage
 from .pipeline import Pipeline
 from .retention import cleanup_old_downloads
+from .web import hash_password, serve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅真实发送时生效；固定限制为最多 1–5 个唯一订单",
     )
 
+    web = subparsers.add_parser("web", help="启动人工上传兜底页面")
+    web.add_argument("--host", help="监听地址，默认取 config.yaml 的 web.host")
+    web.add_argument("--port", type=int, help="监听端口，默认取 config.yaml 的 web.port")
+
+    subparsers.add_parser("web-password", help="生成上传页面的口令哈希")
+
     credentials = subparsers.add_parser("credentials", help="保存凭据到系统凭据库")
     credentials_sub = credentials.add_subparsers(dest="credential_command", required=True)
     credentials_sub.add_parser("set-tms", help="保存 TMS 密码")
@@ -80,6 +87,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "notify-failure":
             return _notify_failure(args, config)
+        if args.command == "web-password":
+            return _web_password()
+        if args.command == "web":
+            # 上传页面自己在每次上传时抢锁，常驻进程不能一直占着它。
+            serve(config, host=args.host, port=args.port)
+            return 0
 
         with portalocker.Lock(config.runtime.lock_path, timeout=1):
             pipeline = Pipeline(config)
@@ -133,6 +146,16 @@ def _notify_failure(args: argparse.Namespace, config: AppConfig) -> int:
         content.append([{"tag": "text", "text": f"摘要：{args.details.strip()}"}])
     message_id = client.send(FeishuMessage("runbow007 运行失败", content))
     print(f"失败告警已发送: message_id={message_id}")
+    return 0
+
+
+def _web_password() -> int:
+    password = getpass.getpass("上传页面口令: ")
+    if password != getpass.getpass("再输入一次: "):
+        print("两次输入不一致", file=sys.stderr)
+        return 2
+    print("把下面这行填到 config.yaml 的 web.password_hash，并清空 web.password：")
+    print(hash_password(password))
     return 0
 
 

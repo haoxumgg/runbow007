@@ -26,3 +26,28 @@ services:
       - ./browser-profile:/app/browser-profile
     security_opt:
       - no-new-privileges:true
+
+  # 人工上传兜底页面。常驻服务，和一次性的 app 共用镜像、配置、数据库和下载目录，
+  # 但不需要浏览器，所以内存上限给得比 app 小很多。
+  web:
+    build:
+      context: .
+    image: runbow007:local
+    init: true
+    restart: unless-stopped
+    mem_limit: 600m
+    mem_swappiness: 0
+    env_file:
+      - ${RUNBOW007_SECRETS_FILE:-./secrets.env}
+    environment:
+      TZ: Asia/Shanghai
+    command: ["--config", "/app/config.yaml", "web"]
+    ports:
+      - "${RUNBOW007_WEB_PORT:-8080}:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    security_opt:
+      - no-new-privileges:true

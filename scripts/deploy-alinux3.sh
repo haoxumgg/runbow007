@@ -42,7 +42,9 @@ chown -R 10001:10001 data downloads logs browser-profile
 chmod +x \
   scripts/run-alinux3.sh \
   scripts/notify-failure-alinux3.sh \
-  scripts/deploy-alinux3.sh
+  scripts/deploy-alinux3.sh \
+  scripts/web-alinux3.sh \
+  scripts/timers-alinux3.sh
 
 export RUNBOW007_SECRETS_FILE=/etc/runbow007/secrets.env
 docker compose --project-directory "$project_root" build app
@@ -63,13 +65,25 @@ install -m 0644 deploy/systemd/runbow007-hourly.timer /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-arrival.service /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-arrival.timer /etc/systemd/system/
 install -m 0644 deploy/systemd/runbow007-failure@.service /etc/systemd/system/
+install -m 0644 deploy/systemd/runbow007-web.service /etc/systemd/system/
 systemctl daemon-reload
+
+# 人工上传兜底页面是常驻服务，任何时候都要在。走 systemctl 而不是直接调脚本：
+# 直接调脚本容器确实起来了，但 systemd 眼里这个 unit 还是 inactive，之后
+# `systemctl stop` 会静默地什么都不做。restart 在未启动时等同于启动，已启动时
+# 会先执行 ExecStop 再重新拉起，正好保证重新部署时容器换成新镜像。
+systemctl enable runbow007-web.service
+systemctl restart runbow007-web.service
+systemctl --no-pager --full status runbow007-web.service || true
 
 if $enable_timers; then
   systemctl enable --now runbow007-hourly.timer runbow007-arrival.timer
-  echo "定时器已启用。"
+  echo "自动下载定时器已启用。"
 else
-  echo "镜像和 systemd 文件已安装，但定时器尚未启动。"
-  echo "请填写 config.yaml 和 /etc/runbow007/secrets.env，完成演练后再执行："
-  echo "sudo scripts/deploy-alinux3.sh --enable-timers"
+  # 只是"不启用"不够：上一次部署开着的定时器会原样留下来。TMS 导出经常取不到
+  # 数据，默认必须是关的，由 scripts/timers-alinux3.sh 手动控制。
+  systemctl disable --now runbow007-hourly.timer runbow007-arrival.timer 2>/dev/null || true
+  echo "自动下载定时器保持关闭；需要时执行 sudo scripts/timers-alinux3.sh on"
 fi
+
+echo "人工上传页面: http://<服务器地址>:${RUNBOW007_WEB_PORT:-8080}/"
